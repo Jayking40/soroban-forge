@@ -236,3 +236,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive dependency of the pinned soroban-sdk 21.x chain, is not
   compiled into the workspace graph, and is ignored in CI with rationale
   until the soroban-sdk 27 migration (issue #14) removes it.
+
+<div id="task-263"></div>

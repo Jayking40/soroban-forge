@@ -1078,3 +1078,319 @@ fn blank_envelope_aborts_remove_withdrawal_limit_without_writing_tx() {
     assert_eq!(client.get_tx_count(), count_before);
     assert_eq!(client.get_withdrawal_limit(&token), active_limit);
 }
+
+#[test]
+fn set_withdrawal_limit_rejects_signature_replayed_for_different_token() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+    let other_token = Address::generate(&env);
+
+    // user1 arms a signature for setting a limit on `token`, but the
+    // invocation runs with `other_token`.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_withdrawal_limit",
+            args: (&accounts.user1, &token, LIMIT_AMOUNT, WINDOW_SECONDS).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_withdrawal_limit(
+        &accounts.user1,
+        &other_token,
+        &LIMIT_AMOUNT,
+        &WINDOW_SECONDS
+    ));
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_withdrawal_limit(&token), None);
+    assert_eq!(client.get_withdrawal_limit(&other_token), None);
+}
+
+#[test]
+fn set_withdrawal_limit_rejects_signature_replayed_for_different_amount() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+
+    // user1 arms a signature for 1_000, but invocation is called with 2_000.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_withdrawal_limit",
+            args: (&accounts.user1, &token, 1_000_i128, WINDOW_SECONDS).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_withdrawal_limit(
+        &accounts.user1,
+        &token,
+        &2_000_i128,
+        &WINDOW_SECONDS
+    ));
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_withdrawal_limit(&token), None);
+}
+
+#[test]
+fn set_withdrawal_limit_rejects_signature_replayed_for_different_window() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+
+    // user1 arms a signature for 3_600s window, but invocation is called with 7_200s.
+    env.mock_auths(&[MockAuth {
+        address: &accounts.user1,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_withdrawal_limit",
+            args: (&accounts.user1, &token, LIMIT_AMOUNT, 3_600_u64).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    assert_auth_abort!(client.try_set_withdrawal_limit(
+        &accounts.user1,
+        &token,
+        &LIMIT_AMOUNT,
+        &7_200_u64
+    ));
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_withdrawal_limit(&token), None);
+}
+
+#[test]
+fn set_withdrawal_limit_by_a_non_owner_is_unauthorized_even_under_mocked_auths() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+
+    // Under blanket mocking the identity check is what rejects: the
+    // non-owner deployer gets the typed error, not a host abort.
+    let err = client
+        .try_set_withdrawal_limit(&accounts.deployer, &token, &LIMIT_AMOUNT, &WINDOW_SECONDS)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_forge_shared_utils::ForgeError::Unauthorized);
+    assert_eq!(client.get_tx_count(), 0);
+    assert_eq!(client.get_withdrawal_limit(&token), None);
+}
+
+#[test]
+fn set_withdrawal_limit_authorization_tree_is_the_owner_entrypoint_frame() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+
+    client.set_withdrawal_limit(&accounts.user1, &token, &LIMIT_AMOUNT, &WINDOW_SECONDS);
+
+    // The tree is the submitter's entrypoint frame only — no token transfer
+    // is involved in proposing a limit change.
+    assert_eq!(
+        env.auths(),
+        [(
+            accounts.user1.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "set_withdrawal_limit"),
+                    (&accounts.user1, &token, LIMIT_AMOUNT, WINDOW_SECONDS).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn remove_withdrawal_limit_by_a_non_owner_is_unauthorized_even_under_mocked_auths() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+    install_withdrawal_limit(&client, &accounts, &token);
+    let count_before = client.get_tx_count();
+
+    let err = client
+        .try_remove_withdrawal_limit(&accounts.deployer, &token)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, soroban_forge_shared_utils::ForgeError::Unauthorized);
+    assert_eq!(client.get_tx_count(), count_before);
+    assert!(client.get_withdrawal_limit(&token).is_some());
+}
+
+#[test]
+fn remove_withdrawal_limit_authorization_tree_is_the_owner_entrypoint_frame() {
+    let (env, contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+    install_withdrawal_limit(&client, &accounts, &token);
+
+    client.remove_withdrawal_limit(&accounts.user1, &token);
+
+    // The tree is the submitter's entrypoint frame only.
+    assert_eq!(
+        env.auths(),
+        [(
+            accounts.user1.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "remove_withdrawal_limit"),
+                    (&accounts.user1, &token).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn get_withdrawal_limit_is_callable_without_authorization() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = Address::generate(&env);
+    install_withdrawal_limit(&client, &accounts, &token);
+
+    // Blank envelope: read-only query requires zero signatures.
+    env.set_auths(&[]);
+
+    let limit = client.get_withdrawal_limit(&token);
+    assert_eq!(
+        limit,
+        Some(WithdrawalLimit {
+            token: token.clone(),
+            amount: LIMIT_AMOUNT,
+            window_seconds: WINDOW_SECONDS,
+        })
+    );
+    assert_eq!(env.auths().len(), 0);
+
+    // Querying an unconfigured token also requires no authorization and returns None.
+    let unconfigured_token = Address::generate(&env);
+    assert_eq!(client.get_withdrawal_limit(&unconfigured_token), None);
+}
+
+#[test]
+fn blank_envelope_aborts_set_withdrawal_limit_and_preserves_policy_and_window_state() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = funded_token(&env, &accounts.user1, DEPOSIT_AMOUNT);
+    client.deposit(&token, &accounts.user1, &DEPOSIT_AMOUNT);
+
+    // Establish an initial active limit of 400.
+    let initial_limit = 400_i128;
+    let tx_id =
+        client.set_withdrawal_limit(&accounts.user1, &token, &initial_limit, &WINDOW_SECONDS);
+    client.confirm(&tx_id, &accounts.user2);
+    client.confirm(&tx_id, &accounts.user3);
+    client.execute(&tx_id);
+    assert_eq!(client.get_tx_count(), 1);
+    assert_eq!(
+        client.get_withdrawal_limit(&token),
+        Some(WithdrawalLimit {
+            token: token.clone(),
+            amount: initial_limit,
+            window_seconds: WINDOW_SECONDS,
+        })
+    );
+
+    // Blank envelope: attempting to propose a different limit aborts.
+    env.set_auths(&[]);
+    assert_auth_abort!(client.try_set_withdrawal_limit(
+        &accounts.user1,
+        &token,
+        &800_i128,
+        &WINDOW_SECONDS
+    ));
+
+    // Policy record, tx counter, and window usage are untouched.
+    assert_eq!(client.get_tx_count(), 1);
+    assert_eq!(
+        client.get_withdrawal_limit(&token),
+        Some(WithdrawalLimit {
+            token: token.clone(),
+            amount: initial_limit,
+            window_seconds: WINDOW_SECONDS,
+        })
+    );
+    assert_eq!(client.get_window_usage(&token), 0);
+
+    // Subsequent withdrawal adheres strictly to the existing 400 limit:
+    // Submitting 500 fails with LimitExceeded.
+    env.mock_all_auths();
+    let err = client
+        .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &500_i128)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        soroban_forge_shared_utils::ForgeError::WithdrawalLimitExceeded
+    );
+
+    // Submitting 300 (within the 400 limit) succeeds and records usage.
+    let w_tx = client
+        .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &300_i128)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(w_tx, 2);
+    assert_eq!(client.get_window_usage(&token), 300);
+}
+
+#[test]
+fn blank_envelope_aborts_remove_withdrawal_limit_and_preserves_policy_and_window_state() {
+    let (env, _contract_id, client, accounts) = setup!();
+    initialize_wallet(&env, &client, &accounts);
+    let token = funded_token(&env, &accounts.user1, DEPOSIT_AMOUNT);
+    client.deposit(&token, &accounts.user1, &DEPOSIT_AMOUNT);
+
+    // Establish an initial active limit of 400.
+    let initial_limit = 400_i128;
+    let tx_id =
+        client.set_withdrawal_limit(&accounts.user1, &token, &initial_limit, &WINDOW_SECONDS);
+    client.confirm(&tx_id, &accounts.user2);
+    client.confirm(&tx_id, &accounts.user3);
+    client.execute(&tx_id);
+    let count_before = client.get_tx_count();
+    assert_eq!(count_before, 1);
+
+    // Blank envelope: attempting to propose removing the limit aborts.
+    env.set_auths(&[]);
+    assert_auth_abort!(client.try_remove_withdrawal_limit(&accounts.user1, &token));
+
+    // Policy record, tx counter, and window usage are untouched.
+    assert_eq!(client.get_tx_count(), count_before);
+    assert_eq!(
+        client.get_withdrawal_limit(&token),
+        Some(WithdrawalLimit {
+            token: token.clone(),
+            amount: initial_limit,
+            window_seconds: WINDOW_SECONDS,
+        })
+    );
+    assert_eq!(client.get_window_usage(&token), 0);
+
+    // Subsequent withdrawal confirms the limit is still actively enforced:
+    // Submitting 500 fails with LimitExceeded.
+    env.mock_all_auths();
+    let err = client
+        .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &500_i128)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        soroban_forge_shared_utils::ForgeError::WithdrawalLimitExceeded
+    );
+
+    // Submitting 300 (within the 400 limit) succeeds.
+    let w_tx = client
+        .try_submit_withdrawal(&accounts.user1, &token, &accounts.arbiter, &300_i128)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(w_tx, 2);
+    assert_eq!(client.get_window_usage(&token), 300);
+}

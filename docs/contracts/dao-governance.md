@@ -30,8 +30,8 @@ voting; a second call returns `ForgeError::AlreadyInitialized`. `action` is
 forwarded as a single `Bytes` argument to the target contract's `execute`
 entrypoint. Each voter may vote once, and the current governance-token
 balance at vote time is added to the selected tally. A zero-balance vote is
-rejected with `ForgeError::InvalidInput`. Finalization still requires a
-strict weighted majority. After the deadline, the first `execute` call finalizes the vote; a
+rejected with `ForgeError::InvalidInput`. Finalisation still requires a
+strict weighted majority. After the deadline, the first `execute` call finalises the vote; a
 succeeded proposal is then dispatched by a subsequent permissionless
 `execute` call. Only a successful target invocation changes `Succeeded` to
 `Executed`. A target revert returns
