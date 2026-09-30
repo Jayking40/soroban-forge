@@ -10,6 +10,7 @@ fn deposit(escrow_id) -> Result<(), ForgeError>
 fn release(escrow_id) -> Result<(), ForgeError>
 fn release_partial(escrow_id, amount) -> Result<(), ForgeError>
 fn refund(escrow_id) -> Result<(), ForgeError>
+fn refund_expired(escrow_id) -> Result<(), ForgeError>
 fn dispute(escrow_id, claimant) -> Result<(), ForgeError>
 fn resolve(escrow_id, in_favor_of_seller) -> Result<(), ForgeError>
 fn cancel(escrow_id) -> Result<(), ForgeError>
@@ -56,6 +57,22 @@ Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
          --cancel--> Cancelled (before funding only)
 ```
 
+## Permissionless expiry refunds
+
+After `created_at + timeout`, any account can call `refund_expired` to transfer
+the full escrow amount to the buyer. The boundary is strict: the ledger
+timestamp must be greater than the deadline. At the exact deadline, only the
+existing party-authorized `refund` path is available; that path's behavior is
+unchanged. `refund_expired` accepts only `Funded` escrows, so a recorded
+`Disputed` state remains frozen. The token transfer happens before the state
+update, and the separate `RefundExpired` event identifies keeper-triggered
+settlements to indexers.
+
+The caller pays the transaction fee and receives no bounty; the call cannot
+redirect funds or produce repeated state changes. Its only successful effect
+is the same terminal refund to the buyer as the existing refund path. An
+already-recorded dispute or terminal state is rejected without moving funds.
+
 ## States
 
 - `Pending` — Created but not funded
@@ -65,6 +82,8 @@ Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
 - `Disputed` — Under arbitration (remaining balance frozen)
 - `Cancelled` — Cancelled before funding
 
+`RefundExpired` is emitted for permissionless keeper refunds, separately from
+the party-triggered `Refunded` event.
 ## Partial Release
 
 `release_partial(escrow_id, amount)` allows the seller to receive the escrow

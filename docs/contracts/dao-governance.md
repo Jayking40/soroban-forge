@@ -13,7 +13,8 @@ permissionless execution of approved opaque actions.
 fn initialize(governance_token) -> Result<(), ForgeError>
 fn configure_bond(token, amount, treasury) -> Result<(), ForgeError>
 fn get_bond_config() -> Result<BondConfig, ForgeError>
-fn propose(proposer, target, action, duration) -> Result<u64, ForgeError>
+fn propose(proposer, target, action, duration, requires, conflicts_with) -> Result<u64, ForgeError>
+fn get_dependencies(proposal_id) -> Result<DependencyView, ForgeError>
 fn vote(proposal_id, voter, support) -> Result<(), ForgeError>
 fn execute(proposal_id) -> Result<(), ForgeError>
 fn cancel_proposal(proposal_id, proposer) -> Result<(), ForgeError>
@@ -30,13 +31,20 @@ voting; a second call returns `ForgeError::AlreadyInitialized`. `action` is
 forwarded as a single `Bytes` argument to the target contract's `execute`
 entrypoint. Each voter may vote once, and the current governance-token
 balance at vote time is added to the selected tally. A zero-balance vote is
-rejected with `ForgeError::InvalidInput`. Finalization still requires a
-strict weighted majority. After the deadline, the first `execute` call finalizes the vote; a
+rejected with `ForgeError::InvalidInput`. Finalisation still requires a
+strict weighted majority. After the deadline, the first `execute` call finalises the vote; a
 succeeded proposal is then dispatched by a subsequent permissionless
 `execute` call. Only a successful target invocation changes `Succeeded` to
 `Executed`. A target revert returns
 `ForgeError::ContractInvocationFailed` and leaves the proposal retryable in
 `Succeeded`.
+
+`requires` lists proposal ids that must reach `Executed` before the target
+action can run. `conflicts_with` is one optional id; if it executes, this
+proposal can never dispatch. Both edges are same-contract relations.
+`get_dependencies` exposes them to indexers. Unknown ids return
+`ForgeError::NotFound`; self edges, duplicate edges, consumed references,
+and cycles return `ForgeError::InvalidInput`.
 
 The DAO call itself is permissionless after voting has ended. A target's own
 `require_auth` is not implicitly satisfied by the DAO's cross-contract call;
@@ -87,11 +95,38 @@ Transition rules enforced by the contract:
 
 ## Proposer cooldown and active proposal limit
 
-To bound proposal creation rates and prevent spam, the contract enforces a concurrent active proposal limit:
-- **Active limit**: Each proposer can have at most `DEFAULT_MAX_ACTIVE_PROPOSALS = 5` concurrent active proposals.
-- **Enforcement**: Calling `propose` when the proposer already has 5 active proposals returns `ForgeError::ProposerCooldown`.
-- **Accounting**: The active count increments on a successful `propose` and decrements when a proposal reaches a terminal state (`Cancelled` via `cancel_proposal`, or `Defeated` / `Executed` via `execute`).
-- **Read-only view**: `get_active_proposal_count(proposer: Address) -> u32` returns the current number of active proposals for `proposer` with zero auth requirements and no state mutations.
+To bound proposal creation and prevent spam, each proposer can have at most
+`DEFAULT_MAX_ACTIVE_PROPOSALS = 5` concurrent active proposals. Exceeding the
+limit returns `ForgeError::ProposerCooldown`. The active count increments on
+successful `propose` and decrements on `Cancelled`, `Defeated`, or `Executed`.
+`get_active_proposal_count(proposer)` is a read-only view.
+
+### Dependency outcomes
+
+| Dependency condition | Consumer state | `execute` result | Resulting consumer state |
+|---|---|---|---|
+| Required proposal is Active or Succeeded | Succeeded | `DeadlineReached` | Succeeded; bond remains held |
+| Required proposal is Cancelled or Defeated | Succeeded | `ContractInvocationFailed` | Succeeded permanently blocked |
+| Required proposal is Executed | Succeeded | target dispatch proceeds | Executed on success |
+| Conflicting proposal is Executed | Succeeded | `InvalidInput` | Succeeded permanently blocked |
+| Conflicting proposal is not Executed | Succeeded | target dispatch proceeds | Executed on success |
+
+The first `execute` on a passed proposal may move it to `Succeeded` while a
+dependency is unresolved. The dependency guard runs before target dispatch,
+refund, and state writes. A blocked call leaves the Succeeded proposal and its
+bond unchanged. If a required proposal is later cancelled or defeated, its
+dependents remain Succeeded and permanently unexecutable; they are not
+automatically cancelled and their bonds stay held. This defines the
+cancellation boundary for the separate amendment/cancellation work in #226.
+
+Cycles are checked at proposal time with iterative DFS over reachable
+`requires` edges. The traversal uses an explicit Soroban `Vec` as its stack
+and a visited set, so it does not consume recursive call-stack depth. Runtime
+is O(V + E) for the reachable dependency subgraph. Since ids must already
+exist, ordinary edges point to older proposals; the traversal also catches
+cycles in malformed stored graphs. `Queued` remains an orthogonal future time
+gate: a timelock can queue work after its dependencies resolve, but is not
+implemented here.
 
 ## Proposal bonds
 
@@ -102,8 +137,15 @@ The governance token configured by `initialize` may be the same token as the
 proposal bond token or a different token; bond amounts never contribute to
 vote weight. Its configuration is stored in instance storage under the
 additive `DataKey::GovernanceToken` key. Existing deployments must call
-`initialize` once before accepting votes. This addition does not change the
-`propose` signature or the serialized `Proposal` shape.
+`initialize` once before accepting votes. Proposal records add the dependency
+fields. The `Proposed` event name and topics stay unchanged; its `data` now
+includes those fields.
+
+This changes the `propose` client signature and serialized `Proposal` shape.
+Consumers must regenerate the DAO client bindings. Existing deployed proposal
+records require an explicit migration before upgrading this contract; this
+feature does not implement that migration, so deploy a new DAO instance when
+legacy proposals must remain readable.
 
 **Configuration.** `configure_bond(token, amount, treasury)` is a one-time,
 permissionless write — first caller wins, later calls return
@@ -272,6 +314,6 @@ address to separate the DAO's records from the token's.
 
 Proposal records (`DataKey::Proposal(u64)`) are stored in persistent storage. `DataKey::Count`, `DataKey::Bond`, `DataKey::BondHeld`, and `DataKey::Vote` entries remain in instance storage.
 
-`propose`, `vote`, `execute`, and `cancel_proposal` extend proposal persistent storage TTL on every write to a 30-day horizon (`30 * DAY_IN_LEDGERS = 518,400` ledgers).
+`propose`, `vote`, `execute`, and `cancel_proposal` extend proposal persistent storage TTL on every write to a 30-day horizon (`30 * DAY_IN_LEDGERS = 518,400` ledgers). Dependency edges live on the proposal record; no top-level storage key is added.
 
 A permissionless public keeper entrypoint `touch_ttl(proposal_id)` allows anyone to bump a proposal's persistent TTL without modifying its state. If the proposal ID does not exist, `touch_ttl` returns `ForgeError::NotFound`.

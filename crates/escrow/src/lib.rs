@@ -8,6 +8,9 @@
 //! custodies the tokens until release, refund, or arbitration:
 //!
 //! ```text
+//! Pending --deposit--> Funded --release--> Completed (seller paid)
+//!                     |        --refund--> Refunded  (buyer back)
+//!                     |        --refund_expired--> Refunded (keeper-triggered after deadline)
 //! Pending --deposit--> Funded --release_partial (×n)--> Funded  (partial)
 //!                     |                                  |
 //!                     |                                  +--> Completed (final partial)
@@ -101,6 +104,8 @@
 //!   status) return `InvalidInput` without modifying storage.
 //! - `refund` — seller before the deadline; buyer may reclaim after the
 //!   deadline.
+//! - `refund_expired` — permissionless after the deadline; pays the buyer
+//!   and cannot settle a disputed escrow.
 //! - `dispute` — the **claimant** (buyer or seller) is passed explicitly
 //!   and must be one of the two parties; their `require_auth` proves the
 //!   claim. Soroban has no "auth by A-or-B" primitive, so an explicit
@@ -236,6 +241,21 @@ pub trait SorobanForgeEscrow {
     /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
     ///   the payout.
     fn refund(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
+
+    /// Permissionlessly refund the full escrow amount to the buyer strictly
+    /// after its deadline. Only valid while `Funded`; a disputed escrow stays
+    /// frozen. The existing party-authorized `refund` path is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no escrow with this id.
+    /// * [`ForgeError::InvalidInput`] — escrow is not `Funded`.
+    /// * [`ForgeError::DeadlineReached`] — the deadline has not passed yet,
+    ///   including the exact deadline timestamp.
+    /// * [`ForgeError::ArithmeticOverflow`] — computing the deadline overflowed.
+    /// * [`ForgeError::TokenTransferFailed`] — the token contract rejected
+    ///   the payout.
+    fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError>;
 
     /// Raise a dispute. `claimant` must be the buyer or the seller and
     /// must authorize the call; only valid while `Funded`. Freezes the
@@ -729,6 +749,38 @@ impl Escrow {
         Ok(())
     }
 
+    /// Permissionlessly refund the buyer after the escrow deadline.
+    ///
+    /// The strict-after boundary leaves the exact deadline to the existing
+    /// party-authorized refund path. Disputed escrows remain frozen, and the
+    /// token transfer precedes the state update so a failed payout is atomic.
+    pub fn refund_expired(env: Env, escrow_id: u64) -> Result<(), ForgeError> {
+        let escrow = Self::load_escrow(&env, escrow_id)?;
+        if escrow.status != EscrowStatus::Funded {
+            return Err(ForgeError::InvalidInput);
+        }
+
+        let now = env.ledger().timestamp();
+        let deadline = escrow
+            .created_at
+            .checked_add(escrow.timeout)
+            .ok_or(ForgeError::ArithmeticOverflow)?;
+        if now <= deadline {
+            return Err(ForgeError::DeadlineReached);
+        }
+
+        transfer_from_contract(&env, &escrow.token, &escrow.buyer, escrow.amount)?;
+
+        let mut refunded = escrow;
+        refunded.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &refunded);
+        bump_entry(&env, &DataKey::Escrow(escrow_id));
+        events::refund_expired(&env, escrow_id, refunded.amount, now);
+        Ok(())
+    }
+
     /// Raise a dispute: the claimant (buyer or seller) authorizes, while
     /// `Funded`. Freezes the remaining balance until the arbiter resolves.
     pub fn dispute(env: Env, escrow_id: u64, claimant: Address) -> Result<(), ForgeError> {
@@ -1161,6 +1213,14 @@ mod events {
     }
 
     #[contractevent]
+    pub struct RefundExpired {
+        #[topic]
+        pub escrow_id: u64,
+        pub refunded_amount: i128,
+        pub timestamp: u64,
+    }
+
+    #[contractevent]
     pub struct Disputed {
         #[topic]
         pub escrow_id: u64,
@@ -1231,6 +1291,15 @@ mod events {
         Refunded {
             escrow_id: escrow.escrow_id,
             data: escrow.clone(),
+        }
+        .publish(env);
+    }
+
+    pub fn refund_expired(env: &Env, escrow_id: u64, refunded_amount: i128, timestamp: u64) {
+        RefundExpired {
+            escrow_id,
+            refunded_amount,
+            timestamp,
         }
         .publish(env);
     }

@@ -89,13 +89,28 @@ fn create_schedule_accepts_beneficiary_signature_with_matching_args() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (
+                &accounts.deployer,
+                beneficiary,
+                &token,
+                TOTAL,
+                CLIFF,
+                DURATION,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     let id = client
-        .try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION)
+        .try_create_schedule(
+            &accounts.deployer,
+            beneficiary,
+            &token,
+            &TOTAL,
+            &CLIFF,
+            &DURATION,
+        )
         .expect("outer ok")
         .expect("contract ok");
     assert_eq!(id, 1);
@@ -114,12 +129,27 @@ fn create_schedule_rejects_signature_from_non_beneficiary() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (
+                &accounts.deployer,
+                beneficiary,
+                &token,
+                TOTAL,
+                CLIFF,
+                DURATION,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let res = client.try_create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
     assert_auth_abort!(res);
 }
 
@@ -134,12 +164,27 @@ fn create_schedule_rejects_signature_over_different_amount() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (
+                &accounts.deployer,
+                beneficiary,
+                &token,
+                TOTAL,
+                CLIFF,
+                DURATION,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_schedule(beneficiary, &token, &(TOTAL + 5000), &CLIFF, &DURATION);
+    let res = client.try_create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &(TOTAL + 5000),
+        &CLIFF,
+        &DURATION,
+    );
     assert_auth_abort!(res);
 }
 
@@ -154,13 +199,28 @@ fn create_schedule_rejects_signature_over_different_cliff_or_duration() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (
+                &accounts.deployer,
+                beneficiary,
+                &token,
+                TOTAL,
+                CLIFF,
+                DURATION,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     // Attempted call alters duration to 2000
-    let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &2000u64);
+    let res = client.try_create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &2000u64,
+    );
     assert_auth_abort!(res);
 }
 
@@ -176,12 +236,27 @@ fn create_schedule_rejects_signature_over_different_token() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "create_schedule",
-            args: (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+            args: (
+                &accounts.deployer,
+                beneficiary,
+                &token,
+                TOTAL,
+                CLIFF,
+                DURATION,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_create_schedule(beneficiary, other_token, &TOTAL, &CLIFF, &DURATION);
+    let res = client.try_create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        other_token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
     assert_auth_abort!(res);
 }
 
@@ -190,7 +265,14 @@ fn create_schedule_authorization_tree_is_beneficiary_root() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
     let beneficiary = &accounts.user1;
 
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
 
     assert_eq!(
         env.auths(),
@@ -200,7 +282,15 @@ fn create_schedule_authorization_tree_is_beneficiary_root() {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
                     Symbol::new(&env, "create_schedule"),
-                    (beneficiary, &token, TOTAL, CLIFF, DURATION).into_val(&env),
+                    (
+                        &accounts.deployer,
+                        beneficiary,
+                        &token,
+                        TOTAL,
+                        CLIFF,
+                        DURATION
+                    )
+                        .into_val(&env),
                 )),
                 sub_invocations: std::vec![],
             },
@@ -217,7 +307,14 @@ fn create_schedule_authorization_tree_is_beneficiary_root() {
 fn claim_accepts_beneficiary_signature_alone() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let beneficiary = &accounts.user1;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -244,7 +341,14 @@ fn claim_rejects_signature_from_non_beneficiary() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let beneficiary = &accounts.user1;
     let attacker = &accounts.user2;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -270,8 +374,22 @@ fn claim_rejects_signature_from_non_beneficiary() {
 fn claim_rejects_signature_replayed_for_different_schedule_id() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let beneficiary = &accounts.user1;
-    let id1 = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
-    let id2 = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id1 = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
+    let id2 = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
 
     env.ledger().set_timestamp(START + DURATION);
 
@@ -296,7 +414,14 @@ fn claim_rejects_signature_replayed_for_different_schedule_id() {
 fn claim_authorization_tree_is_beneficiary_root_entrypoint() {
     let (env, token, _tc, contract_id, client, accounts) = setup!();
     let beneficiary = &accounts.user1;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
 
     env.ledger().set_timestamp(START + DURATION);
     client.claim(&id);
@@ -320,6 +445,170 @@ fn claim_authorization_tree_is_beneficiary_root_entrypoint() {
 }
 
 // -----------------------------------------------------------------------
+// revoke authorization & negative-auth tests (issue #67)
+// -----------------------------------------------------------------------
+
+#[test]
+fn revoke_accepts_funder_signature_alone() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // Enforce mode: arm exactly the funder's revoke authorization.
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client
+        .try_revoke(&id)
+        .expect("outer ok")
+        .expect("revoke ok");
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+}
+
+#[test]
+fn revoke_rejects_signature_from_non_funder() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let attacker = &accounts.user2;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // A third party signs the revoke attempt; the funder does not.
+    env.mock_auths(&[MockAuth {
+        address: attacker,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke(&id);
+    assert_auth_abort!(res);
+    // The schedule is untouched: still Vesting, nothing frozen.
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.get_schedule(&id).revoked_vested, None);
+}
+
+#[test]
+fn revoke_rejects_signature_from_beneficiary() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // The beneficiary cannot revoke their own grant, even with a valid
+    // signature over the exact call.
+    env.mock_auths(&[MockAuth {
+        address: beneficiary,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_revoke(&id);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.get_schedule(&id).revoked_vested, None);
+}
+
+#[test]
+fn revoke_rejects_signature_over_different_schedule_id() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id1 = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id2 = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // Funder authorization armed specifically for id1.
+    env.mock_auths(&[MockAuth {
+        address: funder,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke",
+            args: (id1,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    // Using id1's auth on id2 must fail.
+    let res = client.try_revoke(&id2);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_schedule(&id2).revoked_vested, None);
+}
+
+#[test]
+fn revoke_authorization_tree_is_funder_root_entrypoint() {
+    let (env, token, _tc, contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+    client.revoke(&id);
+
+    // The recorded tree contains the funder's entrypoint frame only, with no
+    // sub-invocations: revocation moves no tokens.
+    assert_eq!(
+        env.auths(),
+        [(
+            funder.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    contract_id.clone(),
+                    Symbol::new(&env, "revoke"),
+                    (id,).into_val(&env),
+                )),
+                sub_invocations: std::vec![],
+            },
+        )],
+    );
+}
+
+#[test]
+fn blank_envelope_aborts_revoke_and_preserves_schedule() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let funder = &accounts.deployer;
+    let beneficiary = &accounts.user1;
+    let id = client.create_schedule(funder, beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+
+    env.ledger().set_timestamp(START + DURATION / 2);
+
+    // Empty envelope: every require_auth fails immediately.
+    env.set_auths(&[]);
+
+    let res = client.try_revoke(&id);
+    assert_auth_abort!(res);
+    assert_eq!(client.get_status(&id), VestingStatus::Vesting);
+    assert_eq!(client.get_schedule(&id).revoked_vested, None);
+
+    // Re-arming proves the id space and storage were left untouched.
+    env.mock_all_auths();
+    client.revoke(&id);
+    assert_eq!(client.get_status(&id), VestingStatus::Revoked);
+}
+
+// -----------------------------------------------------------------------
 // Blank envelope tests (no authorizations armed)
 // -----------------------------------------------------------------------
 
@@ -331,12 +620,26 @@ fn blank_envelope_aborts_create_schedule_and_writes_nothing() {
     // Empty envelope
     env.set_auths(&[]);
 
-    let res = client.try_create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let res = client.try_create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
     assert_auth_abort!(res);
 
     // Re-arming proves no ID counter was consumed
     env.mock_all_auths();
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
     assert_eq!(id, 1);
 }
 
@@ -344,7 +647,14 @@ fn blank_envelope_aborts_create_schedule_and_writes_nothing() {
 fn blank_envelope_aborts_claim_and_preserves_custody() {
     let (env, token, tc, contract_id, client, accounts) = setup!();
     let beneficiary = &accounts.user1;
-    let id = client.create_schedule(beneficiary, &token, &TOTAL, &CLIFF, &DURATION);
+    let id = client.create_schedule(
+        &accounts.deployer,
+        beneficiary,
+        &token,
+        &TOTAL,
+        &CLIFF,
+        &DURATION,
+    );
 
     env.ledger().set_timestamp(START + DURATION);
 

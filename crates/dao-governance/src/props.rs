@@ -137,6 +137,8 @@ impl World {
             &self.target,
             &self.payload(),
             &DURATION,
+            &soroban_sdk::Vec::new(&self.env),
+            &None,
         )
     }
 
@@ -158,6 +160,61 @@ fn vote_action() -> impl Strategy<Value = (usize, bool)> {
 /// A bounded sequence of up to 16 vote actions (unique and repeated picks).
 fn vote_sequence() -> impl Strategy<Value = std::vec::Vec<(usize, bool)>> {
     prop::collection::vec(vote_action(), 0..=16)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Random lower-id edges form DAGs. The independent mirror tracks each
+    /// proposal's Active/Succeeded/Executed phase and permits dispatch only
+    /// after every required id executed, regardless of caller order.
+    #[test]
+    fn p4_random_dependency_dags_match_execution_mirror(
+        masks in prop::collection::vec(any::<u8>(), 1..=5),
+        order in prop::collection::vec(any::<u8>(), 0..=40),
+    ) {
+        let w = setup_world();
+        let n = masks.len();
+        let mut edges: std::vec::Vec<std::vec::Vec<usize>> = std::vec::Vec::new();
+        let mut ids = std::vec::Vec::new();
+        for (idx, mask) in masks.iter().enumerate() {
+            let requires: std::vec::Vec<usize> = (0..idx).filter(|parent| mask & (1 << parent) != 0).collect();
+            let mut sdk_requires = soroban_sdk::Vec::new(&w.env);
+            for parent in &requires { sdk_requires.push_back(ids[*parent]); }
+            let id = w.client().propose(&w.accounts.user1, &w.target, &w.payload(), &DURATION, &sdk_requires, &None);
+            w.client().vote(&id, &w.accounts.user1, &true);
+            ids.push(id);
+            edges.push(requires);
+        }
+        w.env.ledger().set_timestamp(START + DURATION + 1);
+        let mut mirror = std::vec![0u8; n]; // 0 Active, 1 Succeeded, 2 Executed
+        let mut sequence: std::vec::Vec<usize> = order.iter().map(|pick| usize::from(*pick) % n).collect();
+        sequence.extend(0..n);
+        sequence.extend(0..n);
+        for idx in sequence {
+            let deps_ready = edges[idx].iter().all(|parent| mirror[*parent] == 2);
+            match mirror[idx] {
+                0 => {
+                    w.client().execute(&ids[idx]);
+                    mirror[idx] = 1;
+                }
+                1 if deps_ready => {
+                    w.client().execute(&ids[idx]);
+                    mirror[idx] = 2;
+                }
+                1 => {
+                    prop_assert_eq!(w.client().try_execute(&ids[idx]).unwrap_err().unwrap(), ForgeError::DeadlineReached);
+                }
+                _ => {
+                    prop_assert_eq!(w.client().try_execute(&ids[idx]).unwrap_err().unwrap(), ForgeError::InvalidInput);
+                }
+            }
+            let actual = w.client().get_proposal(&ids[idx]).state;
+            let expected = match mirror[idx] { 0 => ProposalState::Active, 1 => ProposalState::Succeeded, _ => ProposalState::Executed };
+            prop_assert_eq!(actual, expected);
+        }
+        prop_assert!(mirror.iter().all(|state| *state == 2));
+    }
 }
 
 // -----------------------------------------------------------------------

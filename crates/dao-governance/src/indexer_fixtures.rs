@@ -63,7 +63,14 @@ fn generate() -> Value {
     env.register_at(&target, MockTarget, ());
     let payload = Bytes::from_slice(&env, b"fixture");
 
-    let proposal_id = client.propose(&accounts.user1, &target, &payload, &DURATION);
+    let proposal_id = client.propose(
+        &accounts.user1,
+        &target,
+        &payload,
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     let mut events = Vec::new();
     capture(&env, &contract, &mut events);
     client.vote(&proposal_id, &accounts.user2, &true);

@@ -71,6 +71,12 @@ to `Expired`, self-cleaning stale pending proposals without external keepers, an
 DAO governance limits concurrent proposals to at most 5 active proposals per
 proposer.)
 
+Escrow's permissionless `refund_expired` does not remove the persistent-entry
+expiry trap: it can settle an expired-in-time escrow only while its record is
+still present. `touch_ttl` can extend an existing entry, but cannot recover
+one after storage expiry (tracked separately by issue #93).
+
+### 3. No events outside escrow
 ### 4. No events in vesting contract
 
 Vesting remains without an event module. Escrow, multi-sig wallet, DAO governance, subscription payments, and marketplace royalties emit typed on-chain events.
