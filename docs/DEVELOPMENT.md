@@ -22,6 +22,25 @@ cargo run -p soroban-forge-cli -- new my-token --path ./custom/path/my-token
 The generated crate is a standalone project that compiles with `cargo check`
 without depending on the workspace layout or a stale shared-utils version pin.
 
+Run the local environment preflight before deploying a contract:
+
+```bash
+# Check stellar, cargo, and the wasm32v1-none target
+cargo run -p soroban-forge-cli -- doctor
+
+# Also verify that a selected artifact exists and is non-empty
+cargo run -p soroban-forge-cli -- doctor \
+  --wasm target/wasm32v1-none/release/soroban_forge_escrow.wasm
+```
+
+`doctor` never installs tools or performs network checks. It runs every check in order and prints
+PASS/FAIL rows plus an exact remediation command for each failure. `stellar --version` and
+`cargo --version` are reported when available; if an existing binary returns a non-zero status or
+no usable version, the check remains PASS with `version unknown`. The target check only passes when
+`rustup target list --installed` succeeds and includes `wasm32v1-none`. The optional artifact check
+distinguishes a missing path, directory, empty file, and filesystem error. Any required failure
+causes the command to exit non-zero and lists the failed checks in the summary.
+
 ```bash
 # Install or update Rust
 rustup update stable

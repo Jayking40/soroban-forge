@@ -1,4 +1,5 @@
 use clap::Args;
+use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
@@ -97,4 +98,11 @@ pub struct EventsArgs {
     /// Network to use
     #[arg(long, default_value = "testnet")]
     pub network: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DoctorArgs {
+    /// Optional WASM artifact to validate as a regular, non-empty file.
+    #[arg(long, value_name = "PATH")]
+    pub wasm: Option<PathBuf>,
 }
