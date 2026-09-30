@@ -1287,6 +1287,12 @@ mod authz;
 #[cfg(test)]
 mod props;
 
+// TTL chaos harness demo: drives randomized ledger gaps through the
+// escrow lifecycle and asserts no persistent entry expires during a
+// legitimate flow.
+#[cfg(test)]
+mod ttl_chaos;
+
 // Generates and validates `indexer/fixtures/escrow-events.json`, the ground
 // truth consumed by the reference event indexer in `packages/typescript-sdk`
 // (see `indexer/docs/event-schema.md`).

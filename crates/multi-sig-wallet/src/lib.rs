@@ -2161,6 +2161,12 @@ mod authz;
 #[cfg(test)]
 mod props;
 
+// TTL chaos harness demo: drives randomized ledger gaps through the
+// multi-sig-wallet transaction lifecycle and asserts no persistent tx
+// record expires during a legitimate flow.
+#[cfg(test)]
+mod ttl_chaos;
+
 #[cfg(test)]
 mod indexer_fixtures;
 
