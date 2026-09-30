@@ -116,12 +116,15 @@ treasury at a terminal transition.
 
 | Entrypoint | Status | Notes |
 |---|---|---|
-| `set_royalty` | ✅ Implemented | Basis-point caps validated |
-| `distribute` | ✅ Implemented | **Real SEP-41 royalty payout**: `distribute(collection, token, payer, seller, amount)` transfers `amount * bps / 10_000` from the payer to the configured recipient and returns the seller's net; a `Disabled`/zero-bps config transfers nothing; standalone settlement for sales handled outside `settle_sale`, the seller's net is not transferred here |
-| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient; transfer-before-state, totals committed last |
-| `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call against one collection + one payer authorization; every validation (cap, amounts, aggregate split math) before the first transfer, per-sale seller-then-recipient order, aggregate summary committed exactly once; any failure rolls the whole batch back |
-| `get_royalty` | ✅ Implemented | Read-only |
-| `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and royalties per collection |
+| `set_royalty` | ✅ Implemented | Basis-point caps validated; new `accrual` flag opts the collection into recoupment-ledger mode (`set_royalty(collection, recipient, bps, accrual)`). The flag is immutable once the collection has settlement/accrual history; flipping it returns `InvalidState` |
+| `distribute` | ✅ Implemented | **Real SEP-41 royalty payout** in payout mode; in accrual mode credits the `(collection, token)` ledger. Returns the seller's net; `Disabled`/zero-bps config transfers nothing |
+| `settle_sale` | ✅ Implemented | **Real token transfers** payer → seller, then payer → royalty recipient (payout) or payer → contract custody (accrual); transfer-before-state, totals committed last |
+| `settle_sales` | ✅ Implemented | **Atomic batch settlement**: up to 20 sales per call; per-sale seller-then-recipient/custody order; aggregate summary and ledger committed once after all transfers; any failure rolls the whole batch back |
+|| `distribute_accrued` | ✅ Implemented | **Atomic sweep** of the `(collection, token)` accrual ledger to the configured recipient; ledger debited before transfer, rolled back on failure to prevent double sweep; collection-authorized |
+|| `get_royalty` | ✅ Implemented | Read-only; returns the new `accrual` field |
+|| `get_settlement_summary` | ✅ Implemented | Read-only; cumulative sales, volume, and actual royalty payouts per collection |
+|| `get_accrued` | ✅ Implemented | Read-only; total accrued balance for `(collection, token)` |
+|| `get_recipient_accrued` | ✅ Implemented | Read-only; accrued balance credited to a recipient for `(collection, token)` |
 | `quote_sale` | ✅ Implemented | Read-only per-sale quote (issue #126): the exact split a settlement would apply (`gross`, effective `royalty_bps`, `royalty_amount`, `seller_net`) via the same `effective_bps` + `split` resolution the settlement entrypoints run; settle-parity including floor rounding, `royalty_amount + seller_net == gross`; disabled collections quote at 0 bps like `settle_sale` settles in full; `NotFound` when unregistered, `InvalidInput` for `amount <= 0`; no auth, no storage mutation, no events |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a collection's royalty + summary records; `NotFound` when unregistered |
 | Storage | ✅ Persistent + TTL | `Royalty` and `SettlementSummary` records in persistent storage with 30-day TTL maintenance |

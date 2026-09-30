@@ -66,13 +66,13 @@ fn set_royalty_accepts_collection_signature() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "set_royalty",
-            args: (&collection, &recipient, BPS).into_val(&env),
+            args: (&collection, &recipient, BPS, false).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
     client
-        .try_set_royalty(&collection, &recipient, &BPS)
+        .try_set_royalty(&collection, &recipient, &BPS, &false)
         .expect("outer ok")
         .expect("contract ok");
 
@@ -91,12 +91,12 @@ fn set_royalty_rejects_signature_from_non_collection() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "set_royalty",
-            args: (&collection, &recipient, BPS).into_val(&env),
+            args: (&collection, &recipient, BPS, false).into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_set_royalty(&collection, &recipient, &BPS);
+    let res = client.try_set_royalty(&collection, &recipient, &BPS, &false);
     assert_auth_abort!(res);
 }
 
@@ -104,7 +104,7 @@ fn set_royalty_rejects_signature_from_non_collection() {
 fn distribute_accepts_collection_and_payer_signatures() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
 
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     // Two frames: the collection authorizes the entrypoint, and the payer
     // authorizes the entrypoint — its frame also carries the nested royalty
@@ -147,7 +147,7 @@ fn distribute_accepts_collection_and_payer_signatures() {
 fn distribute_rejects_seller_signature() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
 
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     // Seller trying to authorize distribute instead of collection. The
     // payer's entrypoint frame still carries the nested token transfer, so
@@ -186,7 +186,7 @@ fn distribute_rejects_seller_signature() {
 fn distribute_rejects_payer_signature_without_token_authorization() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
 
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     // Only the entrypoint frames are armed; the nested SAC transfer pull
     // has no authorization. Funds must not move on entrypoint signatures
@@ -228,7 +228,7 @@ fn settle_sale_accepts_collection_and_payer_signatures_and_records_auth_tree() {
     use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     env.mock_all_auths();
     let token_admin = TokenAdminClient::new(&env, &token);
@@ -285,7 +285,7 @@ fn settle_sale_accepts_collection_and_payer_signatures_and_records_auth_tree() {
 #[test]
 fn settle_sale_rejects_missing_collection_signature() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     env.mock_auths(&[MockAuth {
         address: &payer,
@@ -304,7 +304,7 @@ fn settle_sale_rejects_missing_collection_signature() {
 #[test]
 fn settle_sale_rejects_missing_payer_signature() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     env.mock_auths(&[MockAuth {
         address: &collection,
@@ -323,7 +323,7 @@ fn settle_sale_rejects_missing_payer_signature() {
 #[test]
 fn settle_sale_rejects_non_party_signature_in_place_of_payer() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     env.mock_auths(&[
         MockAuth {
@@ -353,7 +353,7 @@ fn settle_sale_rejects_non_party_signature_in_place_of_payer() {
 #[test]
 fn settle_sale_rejects_replayed_signature_with_altered_args() {
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     let altered_amount = AMOUNT * 2;
 
@@ -388,7 +388,7 @@ fn settle_sales_accepts_valid_batch_and_records_auth_tree() {
     use soroban_sdk::vec;
 
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     env.mock_all_auths();
     let token_admin = TokenAdminClient::new(&env, &token);
@@ -462,7 +462,7 @@ fn settle_sales_auth_failure_leaves_summary_and_balances_untouched() {
     use soroban_sdk::vec;
 
     let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
-    client.set_royalty(&collection, &recipient, &BPS);
+    client.set_royalty(&collection, &recipient, &BPS, &false);
 
     let token_client = TokenClient::new(&env, &token);
     let initial_payer_balance = token_client.balance(&payer);
@@ -488,4 +488,63 @@ fn settle_sales_auth_failure_leaves_summary_and_balances_untouched() {
         client.try_get_settlement_summary(&collection),
         initial_summary
     );
+}
+
+#[test]
+fn distribute_accrued_accepts_collection_signature() {
+    use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
+
+    let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
+    client.set_royalty(&collection, &recipient, &BPS, &true);
+
+    env.mock_all_auths();
+    let token_admin = TokenAdminClient::new(&env, &token);
+    token_admin.mint(&payer, &(AMOUNT * 10));
+
+    client.settle_sale(&collection, &token, &payer, &seller, &AMOUNT);
+    let expected_accrual = AMOUNT * (BPS as i128) / 10_000;
+    assert_eq!(client.get_accrued(&collection, &token), expected_accrual);
+
+    env.mock_auths(&[MockAuth {
+        address: &collection,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "distribute_accrued",
+            args: (&collection, &token).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let swept = client
+        .try_distribute_accrued(&collection, &token)
+        .expect("outer ok")
+        .expect("contract ok");
+    assert_eq!(swept, expected_accrual);
+}
+
+#[test]
+fn distribute_accrued_rejects_non_collection_signature() {
+    use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
+
+    let (env, token, contract_id, client, collection, recipient, seller, payer) = setup!();
+    client.set_royalty(&collection, &recipient, &BPS, &true);
+
+    env.mock_all_auths();
+    let token_admin = TokenAdminClient::new(&env, &token);
+    token_admin.mint(&payer, &(AMOUNT * 10));
+    client.settle_sale(&collection, &token, &payer, &seller, &AMOUNT);
+
+    // The recipient trying to authorize the sweep instead of the collection.
+    env.mock_auths(&[MockAuth {
+        address: &recipient,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "distribute_accrued",
+            args: (&collection, &token).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    let res = client.try_distribute_accrued(&collection, &token);
+    assert_auth_abort!(res);
 }

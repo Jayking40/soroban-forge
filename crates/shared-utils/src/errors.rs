@@ -49,13 +49,11 @@ pub enum ForgeError {
     /// (a valid withdrawal that is too large right now) from a malformed
     /// argument.
     WithdrawalLimitExceeded = 13,
-    /// A subscription is in the `PastDue` lapsed state and the requested
-    /// operation cannot be performed until a catch-up charge restores it to
-    /// `Active`. Kept distinct from [`ForgeError::DeadlineReached`] so a caller
-    /// can tell a lapsed billing state from an argument that was merely
-    /// too early.
-    SubscriptionPastDue = 14,
-    /// A proposer has reached the maximum allowed concurrent active proposals
-    /// or is within the proposer cooldown window.
-    ProposerCooldown = 15,
+    /// The accrual ledger for this collection and token holds no accrued
+    /// royalties, so a sweep cannot pay anything.
+    AccrualEmpty = 14,
+    /// The requested state change would put the configuration into an
+    /// invalid or inconsistent state (e.g. flipping the accrual flag after
+    /// sales have already credited the ledger).
+    InvalidState = 15,
 }

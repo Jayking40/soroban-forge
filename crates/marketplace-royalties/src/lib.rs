@@ -3,76 +3,108 @@
 //! # Soroban Forge — Marketplace Royalties contract
 //!
 //! Enforces creator royalty splits on secondary sales: when an NFT changes
-//! hands, the sale proceeds are split between the seller and up to
-//! [`MAX_ROYALTY_RECIPIENTS`] royalty recipients according to configured
-//! basis-point rates. Each recipient's share is floored independently and
-//! rounding dust remains with the seller; `settle_sale` moves the computed
-//! split in real SEP-41 tokens.
+//! hands, the sale proceeds are split between the seller and one or more
+//! royalty recipients according to configured basis-point rates. This
+//! iteration stores one royalty configuration per collection, with a single
+//! recipient; `settle_sale` moves the computed split in real SEP-41 tokens.
+//!
+//! A collection may opt into **accrual mode**: instead of paying the
+//! recipient on every sale, the royalty share is held in contract custody in
+//! a per-collection (collection, token) ledger and later swept to the
+//! recipient with `distribute_accrued`. Accrual mode and immediate-payout
+//! mode are mutually exclusive per collection, both conserve funds exactly,
+//! and can interleave across different collections without interference.
 //!
 //! Flow:
 //!
 //! ```text
-//! set_royalty(collection, recipient, bps)   -> one-recipient Active config
-//! set_royalty_splits(collection, splits)    -> multi-recipient Active config
+//! set_royalty(collection, recipient, bps, accrual) -> Active config
 //! distribute(collection, token, payer,
-//!             seller, amount)               -> transfers each floored royalty
-//!                                              share from `payer`, returns the
-//!                                              seller net with dust
+//!             seller, amount)               -> in payout mode, transfers
+//!                                              `amount * bps / 10_000` from
+//!                                              `payer` to the recipient and
+//!                                              returns the seller net; in
+//!                                              accrual mode, credits the
+//!                                              ledger and returns the seller
+//!                                              net
 //! settle_sale(collection, token, payer,
-//!             seller, amount)               -> transfers the seller net, then
-//!                                              the royalty share, then commits
-//!                                              the settlement totals
+//!             seller, amount)               -> in payout mode, transfers the
+//!                                              seller net, then the royalty
+//!                                              share; in accrual mode,
+//!                                              transfers the seller net and
+//!                                              credits the ledger, then
+//!                                              commits the settlement totals
 //! settle_sales(collection, token, payer,
 //!              sales: Vec<(seller, amount)>) -> validates the whole batch
 //!                                              (config, cap, every amount,
 //!                                              aggregate split math) before
 //!                                              any token moves, runs each
-//!                                              sale's seller-then-recipient
+//!                                              sale's seller-then-ledger
 //!                                              transfers in sale order, and
 //!                                              commits the aggregate totals
 //!                                              exactly once
+//! distribute_accrued(collection, token)     -> pays the full accrued balance
+//!                                              for (collection, token) to the
+//!                                              configured recipient and
+//!                                              clears the ledger
+//! get_accrued(collection, token)            -> read the accrued total for
+//!                                              (collection, token)
+//! get_recipient_accrued(collection, token,
+//!                         recipient)        -> read the accrued amount
+//!                                              credited to one recipient
 //! ```
 //!
 //! Authorization model:
 //! - `set_royalty` requires the collection (the contract whose config this
-//!   is), and `bps` must not exceed 100% (10_000 bps).
+//!   is), and `bps` must not exceed 100% (10_000 bps). The `accrual` flag is
+//!   fixed once the collection has any settlement or accrual history; trying
+//!   to flip it afterwards returns [`ForgeError::InvalidState`].
 //! - `distribute` requires the collection (as `settle_sale` does) and the
 //!   `payer`, whose authorization covers the nested royalty transfer to the
-//!   configured recipient; it returns the seller's net after the configured
-//!   royalty split, and a `Disabled` configuration settles in full by
-//!   transferring nothing.
+//!   configured recipient (or to the contract ledger in accrual mode); it
+//!   returns the seller's net after the configured royalty split, and a
+//!   `Disabled` configuration settles in full by transferring nothing.
 //! - `settle_sale` requires the collection (as `distribute` does) and the
 //!   `payer`, whose balance funds both transfers; the payer's authorization
-//!   covers the nested token invocations exactly as escrow's does.
+//!   covers the nested token invocations exactly as escrow's does. In
+//!   accrual mode the payer still funds the royalty share, but it is pulled
+//!   into contract custody rather than to the recipient.
 //! - `settle_sales` has the same trust model as `settle_sale`: one
 //!   collection authorization and one payer authorization cover every
 //!   nested token transfer in the batch — no per-sale re-authorization.
-//! - `get_royalty` and `get_settlement_summary` are read-only views.
+//! - `distribute_accrued` is collection-authorized: the collection whose
+//!   config controls the program decides when the accrued balance is swept.
+//!   The contract disburses its own prior custody, so no payer signature is
+//!   required. The ledger is debited before any outbound transfer; if the
+//!   transfer fails the whole invocation rolls back and the ledger is
+//!   restored, preventing a double sweep.
+//! - `get_royalty`, `get_settlement_summary`, `get_accrued`, and
+//!   `get_recipient_accrued` are read-only views.
 //!
 //! Settlement follows escrow's transfer-before-state ordering: all token
 //! transfers run before any settlement state is committed, `settle_sale`
-//! pays the royalty recipient last so a failed transfer can never leave it
-//! partially paid, `distribute` pays only the royalty recipient (the
-//! seller's net is the caller's responsibility), and token failures are
-//! bucketed into `TokenTransferFailed`. Any returned error rolls the whole
-//! invocation back. `settle_sales` extends that discipline to the batch:
-//! every fallible step (configuration load, the [`MAX_SETTLE_SALES`] cap,
-//! per-sale `amount > 0`, the per-sale split math, and the aggregate check
-//! against the stored summary) runs before the first transfer, the summary
-//! is written once per call, and a failure in any sale — including a later
+//! pays the royalty recipient last (or credits the ledger in accrual mode)
+//! so a failed transfer can never leave it partially paid, `distribute` pays
+//! only the royalty recipient/ledger (the seller's net is the caller's
+//! responsibility), and token failures are bucketed into
+//! `TokenTransferFailed`. Any returned error rolls the whole invocation
+//! back. `settle_sales` extends that discipline to the batch: every fallible
+//! step (configuration load, the [`MAX_SETTLE_SALES`] cap, per-sale
+//! `amount > 0`, the per-sale split math, and the aggregate check against
+//! the stored summary) runs before the first transfer, the summary is
+//! written once per call, and a failure in any sale — including a later
 //! sale's transfer — reverts the entire invocation, so no sale in the batch
-//! is ever half-settled. Split vectors are stored in persistent storage under
-//! a separate key from the legacy `Royalty` record. Legacy records without
-//! that key are read as one-recipient configurations; a storage-breaking
-//! upgrade must migrate those records before removing this fallback.
-//! Per-token royalties remain out of scope.
+//! is ever half-settled. In accrual mode the batch aggregates the royalty
+//! credits and writes the ledger exactly once after every transfer
+//! succeeds. Multiple recipients per collection and per-token royalties
+//! remain out of scope for this iteration.
 
 #[cfg(test)]
 extern crate std;
 
 use soroban_forge_shared_utils::{bump_entry as shared_bump_entry, ForgeError};
 use soroban_sdk::{
-    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env,
+    contract, contractclient, contractevent, contractimpl, contracttype, token, Address, Env, Map,
 };
 
 /// Maximum number of sales one `settle_sales` invocation may settle,
@@ -104,28 +136,30 @@ pub struct RoyaltyShare {
 /// Public interface for the Soroban Forge marketplace royalties contract.
 #[contractclient(name = "SorobanForgeMarketplaceRoyaltiesClient")]
 pub trait SorobanForgeMarketplaceRoyalties {
-    /// Register or update the royalty recipient and basis-point rate for
-    /// `collection`, replacing any multi-recipient split with one recipient.
+    /// Register or update the royalty recipient, basis-point rate, and
+    /// accrual mode for `collection`.
+    ///
+    /// `accrual == true` opts the collection into the recoupment ledger: all
+    /// future royalty shares are credited to the contract's custody ledger
+    /// for `(collection, token)` and only paid out when `distribute_accrued`
+    /// is invoked. The `accrual` flag may not be flipped after the collection
+    /// has any settlement or accrual history; doing so returns
+    /// [`ForgeError::InvalidState`].
     fn set_royalty(
         env: Env,
         collection: Address,
         recipient: Address,
         bps: u32,
-    ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
-
-    /// Atomically replace all recipients in the collection's split.
-    fn set_royalty_splits(
-        env: Env,
-        collection: Address,
-        recipients: soroban_sdk::Vec<RoyaltyShare>,
+        accrual: bool,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
 
     /// Distribute the royalty share of `amount` from a sale of `collection`:
-    /// transfer it from `payer` to the configured recipient in `token` and
-    /// return the net owed to the seller after royalties. A standalone
-    /// royalty settlement for cases where the underlying sale/payment is
-    /// handled outside `settle_sale` — the seller's net is not transferred
-    /// here.
+    /// in payout mode, transfer it from `payer` to the configured recipient in
+    /// `token`; in accrual mode, credit it to the `(collection, token)`
+    /// ledger held in contract custody. Returns the net owed to the seller
+    /// after royalties. A standalone royalty settlement for cases where the
+    /// underlying sale/payment is handled outside `settle_sale` — the
+    /// seller's net is not transferred here.
     fn distribute(
         env: Env,
         collection: Address,
@@ -135,9 +169,11 @@ pub trait SorobanForgeMarketplaceRoyalties {
         amount: i128,
     ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 
-    /// Settle a sale of `collection` atomically: transfer the seller's net
-    /// and the royalty share from `payer` in `token`, then commit the
-    /// collection's cumulative settlement totals.
+    /// Settle a sale of `collection` atomically in `token`: transfer the
+    /// seller's net and the royalty share from `payer`. In payout mode the
+    /// royalty share goes to the configured recipient; in accrual mode it
+    /// is credited to the contract's `(collection, token)` ledger. Then
+    /// commit the collection's cumulative settlement totals.
     fn settle_sale(
         env: Env,
         collection: Address,
@@ -216,7 +252,9 @@ pub trait SorobanForgeMarketplaceRoyalties {
         amount: i128,
     ) -> Result<SaleQuote, soroban_forge_shared_utils::ForgeError>;
 
-    /// Permissionless keeper entrypoint: extend the persistent storage TTL of a collection's royalty configuration and settlement summary.
+    /// Permissionless keeper entrypoint: extend the persistent storage TTL
+    /// of a collection's royalty configuration, settlement summary, and any
+    /// accrual ledger entries.
     ///
     /// # Errors
     ///
@@ -225,6 +263,47 @@ pub trait SorobanForgeMarketplaceRoyalties {
         env: Env,
         collection: Address,
     ) -> Result<(), soroban_forge_shared_utils::ForgeError>;
+
+    /// Pay out the full accrued royalty balance for `(collection, token)`
+    /// from contract custody to the configured recipient.
+    ///
+    /// Requires the collection's authorization. The ledger is debited before
+    /// any outbound transfer; if the transfer fails the whole invocation
+    /// rolls back and the ledger is restored, preventing a double sweep.
+    ///
+    /// # Errors
+    ///
+    /// * [`ForgeError::NotFound`] — no royalty configuration for this
+    ///   collection.
+    /// * [`ForgeError::AccrualEmpty`] — the `(collection, token)` ledger
+    ///   holds no accrued royalties.
+    /// * [`ForgeError::TokenTransferFailed`] — the outbound transfer failed.
+    fn distribute_accrued(
+        env: Env,
+        collection: Address,
+        token: Address,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the total accrued royalty balance held in contract custody for
+    /// `(collection, token)` (read-only view). Returns `0` when the ledger
+    /// has never been credited.
+    fn get_accrued(
+        env: Env,
+        collection: Address,
+        token: Address,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
+
+    /// Read the accrued royalty balance credited to `recipient` for
+    /// `(collection, token)` (read-only view). With the current single-
+    /// recipient configuration this equals [`get_accrued`]; it is exposed
+    /// so multi-recipient splits can extend it without changing the view
+    /// shape.
+    fn get_recipient_accrued(
+        env: Env,
+        collection: Address,
+        token: Address,
+        recipient: Address,
+    ) -> Result<i128, soroban_forge_shared_utils::ForgeError>;
 }
 
 /// Lifecycle state of a registered royalty configuration.
@@ -249,11 +328,15 @@ pub struct Royalty {
     pub bps: u32,
     /// Whether the configuration is currently enforced.
     pub status: RoyaltyStatus,
+    /// Whether the collection is in accrual mode: royalty shares are held
+    /// in contract custody on the `(collection, token)` ledger until
+    /// explicitly swept by `distribute_accrued`.
+    pub accrual: bool,
 }
 
-/// The aggregate royalty amount and seller amount for one atomic settlement:
-/// one `settle_sale` invocation, or one sale of a `settle_sales` batch.
-/// `royalty_share` aggregates every recipient's separately floored payment.
+/// The two amounts one atomic settlement transferred: one `settle_sale`
+/// invocation, or one sale of a `settle_sales` batch. Shared by both
+/// entrypoints so generated clients can reuse the type.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Settlement {
@@ -271,9 +354,32 @@ pub struct SettlementSummary {
     pub sales: u32,
     /// Sum of every settled sale amount.
     pub gross_volume: i128,
-    /// Sum of every royalty share transferred across all recipients.
+    /// Sum of every royalty share transferred to the recipient (or, in
+    /// accrual mode, actually swept by `distribute_accrued`).
     pub royalties_paid: i128,
 }
+
+/// Accrued royalty balance held in contract custody for one
+/// `(collection, token)` pair.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccrualLedger {
+    /// Total royalty shares credited to the ledger. The contract's actual
+    /// token balance for `(collection, token)` must match this number at
+    /// all times on the success path.
+    pub total: i128,
+    /// Per-recipient accrued totals. With the current single-recipient
+    /// configuration this contains one entry; the shape is kept so a
+    /// future multi-recipient split can reuse it without a storage
+    /// migration.
+    pub per_recipient: Map<Address, i128>,
+}
+
+/// Persistent-storage key for an accrual ledger, keyed by
+/// `(collection, token)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccrualLedgerKey(pub Address, pub Address);
 
 /// The split one sale of a collection would apply at settlement time, as
 /// returned by [`MarketplaceRoyalties::quote_sale`]. For a split config,
@@ -318,9 +424,8 @@ enum DataKey {
     Royalty(Address),
     /// The cumulative settlement totals for `Address` collection (persistent storage).
     Summary(Address),
-    /// Split vector. Older deployments may not have this key. Appended to
-    /// preserve the encoded discriminants of the existing persistent keys.
-    Splits(Address),
+    /// The accrued royalty balance for `(collection, token)` (persistent storage).
+    AccrualLedger(AccrualLedgerKey),
 }
 
 /// The deployable marketplace royalties contract.
@@ -332,23 +437,46 @@ impl MarketplaceRoyalties {
     /// Register or update a royalty configuration for `collection`.
     ///
     /// Requires the collection's authorization and `bps <= 10_000`
-    /// (100%). Re-registration updates the existing configuration in place.
+    /// (100%). Re-registration updates the existing configuration in place,
+    /// but the `accrual` flag is immutable once the collection has any
+    /// settlement or accrual history; flipping it afterwards returns
+    /// [`ForgeError::InvalidState`].
     pub fn set_royalty(
         env: Env,
         collection: Address,
         recipient: Address,
         bps: u32,
+        accrual: bool,
     ) -> Result<(), ForgeError> {
         if bps > 10_000 {
             return Err(ForgeError::InvalidInput);
         }
         collection.require_auth();
 
+        // The accrual flag is immutable once the collection has settlement
+        // history. The settlement summary is written on the first successful
+        // sale/distribute, so its presence is the authoritative signal; an
+        // accrual ledger cannot exist without a corresponding sale.
+        let has_history = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Summary(collection.clone()));
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<_, Royalty>(&DataKey::Royalty(collection.clone()))
+        {
+            if existing.accrual != accrual && has_history {
+                return Err(ForgeError::InvalidState);
+            }
+        }
+
         let royalty = Royalty {
             collection,
             recipient,
             bps,
             status: RoyaltyStatus::Active,
+            accrual,
         };
         let key = DataKey::Royalty(royalty.collection.clone());
         env.storage().persistent().set(&key, &royalty);
@@ -410,9 +538,11 @@ impl MarketplaceRoyalties {
     /// Requires the collection's authorization (the payer's authorization
     /// covers the nested token transfer, exactly as `settle_sale`) and
     /// `amount > 0`. Computes the split with
-    /// `split` — the same math as `settle_sale` — then transfers only the
-    /// royalty share from `payer` to the configured recipient **before any
-    /// settlement state is committed**. The `seller`'s net is *not*
+    /// `split` — the same math as `settle_sale` — then, in payout mode,
+    /// transfers only the royalty share from `payer` to the configured
+    /// recipient **before any settlement state is committed**. In accrual
+    /// mode the royalty share is pulled into contract custody on the
+    /// `(collection, token)` ledger instead. The `seller`'s net is *not*
     /// transferred here: this is a standalone royalty settlement for cases
     /// where the underlying sale/payment is handled outside `settle_sale`,
     /// so the caller is responsible for paying the seller separately. The
@@ -422,7 +552,6 @@ impl MarketplaceRoyalties {
     /// amount. Token failures are bucketed into
     /// [`ForgeError::TokenTransferFailed`], and any returned error rolls
     /// the whole invocation back — a failed transfer never commits totals.
-    /// The contract never takes custody of tokens.
     pub fn distribute(
         env: Env,
         collection: Address,
@@ -444,18 +573,31 @@ impl MarketplaceRoyalties {
 
         // Every fallible computation runs before the transfer, so an
         // arithmetic failure can never strand funds mid-settlement.
-        let recipients = royalty_splits(&env, &royalty)?;
-        let (shares, royalty_share, seller_net) =
-            split_recipients(&env, amount, &royalty, &recipients)?;
-        let summary = next_summary(&env, &collection, 1, amount, royalty_share)?;
+        let (royalty_share, seller_net) = split(amount, effective_bps(&royalty))?;
+        let summary = if royalty.accrual {
+            // In accrual mode the royalty share is not yet paid to the
+            // recipient, so `royalties_paid` stays at its current value
+            // until a sweep runs.
+            next_summary(&env, &collection, 1, amount, 0)?
+        } else {
+            next_summary(&env, &collection, 1, amount, royalty_share)?
+        };
 
         // Transfer-before-state (escrow pattern): the royalty recipient is
         // paid only after the split math succeeded and before any
-        // accounting state is committed.
-        for (index, recipient) in recipients.iter().enumerate() {
-            let share = shares.get(index as u32).ok_or(ForgeError::InvalidInput)?;
-            if share > 0 {
-                transfer(&env, &token, &payer, &recipient.recipient, share)?;
+        // accounting state is committed. In accrual mode the share is pulled
+        // into contract custody instead.
+        if royalty_share > 0 {
+            if royalty.accrual {
+                transfer(
+                    &env,
+                    &token,
+                    &payer,
+                    &env.current_contract_address(),
+                    royalty_share,
+                )?;
+            } else {
+                transfer(&env, &token, &payer, &royalty.recipient, royalty_share)?;
             }
         }
 
@@ -469,6 +611,28 @@ impl MarketplaceRoyalties {
             bump_entry(&env, &splits_key);
         }
         bump_entry(&env, &summary_key);
+        if royalty.accrual && royalty_share > 0 {
+            let ledger = credit_accrual_ledger(
+                &env,
+                &collection,
+                &token,
+                &royalty.recipient,
+                royalty_share,
+            )?;
+            let ledger_key =
+                DataKey::AccrualLedger(AccrualLedgerKey(collection.clone(), token.clone()));
+            env.storage().persistent().set(&ledger_key, &ledger);
+            shared_bump_entry(&env, &ledger_key);
+            events::accrual_credited(
+                &env,
+                &collection,
+                &token,
+                &payer,
+                &seller,
+                &royalty.recipient,
+                royalty_share,
+            );
+        }
         events::sale_settled(
             &env,
             &collection,
@@ -519,21 +683,33 @@ impl MarketplaceRoyalties {
 
         // Every fallible computation runs before the first transfer, so an
         // arithmetic failure can never strand funds mid-settlement.
-        let recipients = royalty_splits(&env, &royalty)?;
-        let (shares, royalty_share, seller_net) =
-            split_recipients(&env, amount, &royalty, &recipients)?;
-        let summary = next_summary(&env, &collection, 1, amount, royalty_share)?;
+        let (royalty_share, seller_net) = split(amount, effective_bps(&royalty))?;
+        let summary = if royalty.accrual {
+            // In accrual mode the royalty share is held in contract custody,
+            // so `royalties_paid` is only updated on a later sweep.
+            next_summary(&env, &collection, 1, amount, 0)?
+        } else {
+            next_summary(&env, &collection, 1, amount, royalty_share)?
+        };
 
         // Transfer-before-state (escrow pattern): the seller is paid first
         // and the royalty recipient last, so the protected party is only
-        // ever paid when everything before it already succeeded.
+        // ever paid when everything before it already succeeded. In accrual
+        // mode the royalty share is pulled into contract custody instead.
         if seller_net > 0 {
             transfer(&env, &token, &payer, &seller, seller_net)?;
         }
-        for (index, recipient) in recipients.iter().enumerate() {
-            let share = shares.get(index as u32).ok_or(ForgeError::InvalidInput)?;
-            if share > 0 {
-                transfer(&env, &token, &payer, &recipient.recipient, share)?;
+        if royalty_share > 0 {
+            if royalty.accrual {
+                transfer(
+                    &env,
+                    &token,
+                    &payer,
+                    &env.current_contract_address(),
+                    royalty_share,
+                )?;
+            } else {
+                transfer(&env, &token, &payer, &royalty.recipient, royalty_share)?;
             }
         }
 
@@ -547,6 +723,28 @@ impl MarketplaceRoyalties {
             bump_entry(&env, &splits_key);
         }
         bump_entry(&env, &summary_key);
+        if royalty.accrual && royalty_share > 0 {
+            let ledger = credit_accrual_ledger(
+                &env,
+                &collection,
+                &token,
+                &royalty.recipient,
+                royalty_share,
+            )?;
+            let ledger_key =
+                DataKey::AccrualLedger(AccrualLedgerKey(collection.clone(), token.clone()));
+            env.storage().persistent().set(&ledger_key, &ledger);
+            shared_bump_entry(&env, &ledger_key);
+            events::accrual_credited(
+                &env,
+                &collection,
+                &token,
+                &payer,
+                &seller,
+                &royalty.recipient,
+                royalty_share,
+            );
+        }
         events::sale_settled(
             &env,
             &collection,
@@ -619,15 +817,22 @@ impl MarketplaceRoyalties {
         let mut per_sale_shares = soroban_sdk::Vec::new(&env);
         let mut gross_volume: i128 = 0;
         let mut royalties_paid: i128 = 0;
+        let mut accrual_credit: i128 = 0;
         for (_, amount) in sales.iter() {
             let (shares, royalty_share, seller_net) =
                 split_recipients(&env, amount, &royalty, &recipients)?;
             gross_volume = gross_volume
                 .checked_add(amount)
                 .ok_or(ForgeError::ArithmeticOverflow)?;
-            royalties_paid = royalties_paid
-                .checked_add(royalty_share)
-                .ok_or(ForgeError::ArithmeticOverflow)?;
+            if royalty.accrual {
+                accrual_credit = accrual_credit
+                    .checked_add(royalty_share)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+            } else {
+                royalties_paid = royalties_paid
+                    .checked_add(royalty_share)
+                    .ok_or(ForgeError::ArithmeticOverflow)?;
+            }
             settlements.push_back(Settlement {
                 royalty_share,
                 seller_net,
@@ -637,9 +842,10 @@ impl MarketplaceRoyalties {
         let summary = next_summary(&env, &collection, count, gross_volume, royalties_paid)?;
 
         // Transfer-before-state (escrow pattern), per sale in sale order:
-        // each sale pays its seller first and the royalty recipient last,
-        // and the summary is still not committed — a failure in any sale,
-        // including a later one, rolls the entire invocation back.
+        // each sale pays its seller first and the royalty recipient last
+        // (or into contract custody in accrual mode), and the summary is
+        // still not committed — a failure in any sale, including a later one,
+        // rolls the entire invocation back.
         for i in 0..count {
             // Both `get`s are in range by construction: `sales` has `count`
             // entries and `settlements` was built one-for-one from it.
@@ -648,17 +854,30 @@ impl MarketplaceRoyalties {
             if settlement.seller_net > 0 {
                 transfer(&env, &token, &payer, &seller, settlement.seller_net)?;
             }
-            let shares = per_sale_shares.get(i).ok_or(ForgeError::InvalidInput)?;
-            for (index, recipient) in recipients.iter().enumerate() {
-                let share = shares.get(index as u32).ok_or(ForgeError::InvalidInput)?;
-                if share > 0 {
-                    transfer(&env, &token, &payer, &recipient.recipient, share)?;
+            if settlement.royalty_share > 0 {
+                if royalty.accrual {
+                    transfer(
+                        &env,
+                        &token,
+                        &payer,
+                        &env.current_contract_address(),
+                        settlement.royalty_share,
+                    )?;
+                } else {
+                    transfer(
+                        &env,
+                        &token,
+                        &payer,
+                        &royalty.recipient,
+                        settlement.royalty_share,
+                    )?;
                 }
             }
         }
 
         // Every transfer succeeded; only now commit settlement state, once.
         let summary_key = DataKey::Summary(collection.clone());
+        let royalty_key = DataKey::Royalty(collection.clone());
         let royalty_key = DataKey::Royalty(collection.clone());
         env.storage().persistent().set(&summary_key, &summary);
         bump_entry(&env, &royalty_key);
@@ -667,6 +886,34 @@ impl MarketplaceRoyalties {
             bump_entry(&env, &splits_key);
         }
         bump_entry(&env, &summary_key);
+        if royalty.accrual && accrual_credit > 0 {
+            let ledger = credit_accrual_ledger(
+                &env,
+                &collection,
+                &token,
+                &royalty.recipient,
+                accrual_credit,
+            )?;
+            let ledger_key =
+                DataKey::AccrualLedger(AccrualLedgerKey(collection.clone(), token.clone()));
+            env.storage().persistent().set(&ledger_key, &ledger);
+            shared_bump_entry(&env, &ledger_key);
+            for i in 0..count {
+                let settlement = settlements.get(i).ok_or(ForgeError::InvalidInput)?;
+                if settlement.royalty_share > 0 {
+                    let (seller, _) = sales.get(i).ok_or(ForgeError::InvalidInput)?;
+                    events::accrual_credited(
+                        &env,
+                        &collection,
+                        &token,
+                        &payer,
+                        &seller,
+                        &royalty.recipient,
+                        settlement.royalty_share,
+                    );
+                }
+            }
+        }
 
         Ok(settlements)
     }
@@ -730,8 +977,15 @@ impl MarketplaceRoyalties {
         })
     }
 
-    /// Permissionless keeper: bump the royalty and summary entries' TTL without changing
-    /// any state.
+    /// Permissionless keeper: bump the royalty and summary entries' TTL
+    /// without changing any state.
+    ///
+    /// The accrual ledger for a `(collection, token)` pair is bumped on every
+    /// credit and on every successful sweep, so it is never evictable mid-
+    /// accrual as long as sales continue. `touch_ttl` does not enumerate
+    /// token-specific ledgers because the contract does not maintain a
+    /// per-collection token index; callers can keep a ledger alive between
+    /// sales by issuing a no-op credit or by sweeping it.
     ///
     /// Returns `ForgeError::NotFound` if no royalty configuration exists for `collection`.
     pub fn touch_ttl(env: Env, collection: Address) -> Result<(), ForgeError> {
@@ -749,6 +1003,119 @@ impl MarketplaceRoyalties {
             bump_entry(&env, &summary_key);
         }
         Ok(())
+    }
+
+    /// Pay out the full accrued royalty balance for `(collection, token)`
+    /// from contract custody to the configured recipient, then clear the
+    /// ledger.
+    ///
+    /// Requires the collection's authorization. The ledger is debited before
+    /// the outbound transfer so a replay or concurrent sweep cannot double-
+    /// pay; if the transfer fails the whole invocation rolls back and the
+    /// ledger is restored.
+    pub fn distribute_accrued(
+        env: Env,
+        collection: Address,
+        token: Address,
+    ) -> Result<i128, ForgeError> {
+        let royalty: Royalty = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Royalty(collection.clone()))
+            .ok_or(ForgeError::NotFound)?;
+        collection.require_auth();
+
+        let ledger_key =
+            DataKey::AccrualLedger(AccrualLedgerKey(collection.clone(), token.clone()));
+        let ledger: AccrualLedger = env
+            .storage()
+            .persistent()
+            .get(&ledger_key)
+            .ok_or(ForgeError::AccrualEmpty)?;
+        if ledger.total <= 0 {
+            return Err(ForgeError::AccrualEmpty);
+        }
+
+        // Compute the recipient payout from the stored per-recipient shares.
+        // With the current single-recipient configuration the map holds one
+        // entry whose value equals `ledger.total`; this shape is kept so
+        // multi-recipient splits can sweep each recipient independently.
+        let recipient_share = ledger
+            .per_recipient
+            .get(royalty.recipient.clone())
+            .unwrap_or(0);
+        if recipient_share <= 0 || recipient_share != ledger.total {
+            // Defensive: the per-recipient map should always be consistent
+            // with the total for a single-recipient config. Treat mismatch
+            // as an empty sweep rather than a partial/inconsistent payout.
+            return Err(ForgeError::AccrualEmpty);
+        }
+
+        // Debit the ledger before the transfer. A failure rolls back the
+        // whole invocation, so this write is undone and the ledger is never
+        // left empty while tokens remain in custody.
+        let cleared = AccrualLedger {
+            total: 0,
+            per_recipient: Map::new(&env),
+        };
+        env.storage().persistent().set(&ledger_key, &cleared);
+        shared_bump_entry(&env, &ledger_key);
+
+        transfer(
+            &env,
+            &token,
+            &env.current_contract_address(),
+            &royalty.recipient,
+            recipient_share,
+        )?;
+
+        // Only after the outbound transfer succeeds, record the payout in
+        // the settlement summary.
+        let summary = next_summary(&env, &collection, 0, 0, recipient_share)?;
+        let summary_key = DataKey::Summary(collection.clone());
+        env.storage().persistent().set(&summary_key, &summary);
+        bump_entry(&env, &DataKey::Royalty(collection.clone()));
+        bump_entry(&env, &summary_key);
+
+        events::accrual_distributed(
+            &env,
+            &collection,
+            &token,
+            &royalty.recipient,
+            recipient_share,
+        );
+
+        Ok(recipient_share)
+    }
+
+    /// Read the total accrued royalty balance held in contract custody for
+    /// `(collection, token)`. Returns `0` when no ledger exists.
+    pub fn get_accrued(env: Env, collection: Address, token: Address) -> Result<i128, ForgeError> {
+        // Readability only: no need to require a config because an empty
+        // ledger is unambiguous for any address pair.
+        let ledger: Option<AccrualLedger> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AccrualLedger(AccrualLedgerKey(collection, token)));
+        Ok(ledger.map(|l| l.total).unwrap_or(0))
+    }
+
+    /// Read the accrued royalty balance credited to `recipient` for
+    /// `(collection, token)`. Returns `0` when no ledger exists for the
+    /// recipient.
+    pub fn get_recipient_accrued(
+        env: Env,
+        collection: Address,
+        token: Address,
+        recipient: Address,
+    ) -> Result<i128, ForgeError> {
+        let ledger: Option<AccrualLedger> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AccrualLedger(AccrualLedgerKey(collection, token)));
+        Ok(ledger
+            .map(|l| l.per_recipient.get(recipient).unwrap_or(0))
+            .unwrap_or(0))
     }
 }
 
@@ -870,6 +1237,42 @@ fn next_summary(
     Ok(summary)
 }
 
+/// Load the accrual ledger for `(collection, token)`, defaulting to an empty
+/// ledger when none exists.
+fn get_accrual_ledger(env: &Env, collection: &Address, token: &Address) -> AccrualLedger {
+    let key = DataKey::AccrualLedger(AccrualLedgerKey(collection.clone(), token.clone()));
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(AccrualLedger {
+            total: 0,
+            per_recipient: Map::new(env),
+        })
+}
+
+/// Credit `amount` to the `(collection, token)` accrual ledger for
+/// `recipient`, returning the updated ledger **without writing it**. The
+/// caller commits the ledger after every dependent transfer succeeds.
+fn credit_accrual_ledger(
+    env: &Env,
+    collection: &Address,
+    token: &Address,
+    recipient: &Address,
+    amount: i128,
+) -> Result<AccrualLedger, ForgeError> {
+    let mut ledger = get_accrual_ledger(env, collection, token);
+    ledger.total = ledger
+        .total
+        .checked_add(amount)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    let current = ledger.per_recipient.get(recipient.clone()).unwrap_or(0);
+    let updated = current
+        .checked_add(amount)
+        .ok_or(ForgeError::ArithmeticOverflow)?;
+    ledger.per_recipient.set(recipient.clone(), updated);
+    Ok(ledger)
+}
+
 /// Move `amount` of `token` from `from` to `to`.
 ///
 /// Same typed-error bucketing as escrow: a client receiving
@@ -906,6 +1309,7 @@ mod events {
         pub collection: Address,
         pub recipient: Address,
         pub bps: u32,
+        pub accrual: bool,
     }
 
     #[contractevent]
@@ -921,11 +1325,36 @@ mod events {
         pub royalty_share: i128,
     }
 
+    /// Emitted when a sale's royalty share is credited to the contract's
+    /// accrual ledger instead of paid out immediately.
+    #[contractevent]
+    pub struct AccrualCredited {
+        #[topic]
+        pub collection: Address,
+        pub token: Address,
+        pub payer: Address,
+        pub seller: Address,
+        pub recipient: Address,
+        pub amount: i128,
+    }
+
+    /// Emitted when the accrued royalty balance for `(collection, token)`
+    /// is swept to the configured recipient.
+    #[contractevent]
+    pub struct AccrualDistributed {
+        #[topic]
+        pub collection: Address,
+        pub token: Address,
+        pub recipient: Address,
+        pub amount: i128,
+    }
+
     pub fn royalty_configured(env: &Env, royalty: &Royalty) {
         RoyaltyConfigured {
             collection: royalty.collection.clone(),
             recipient: royalty.recipient.clone(),
             bps: royalty.bps,
+            accrual: royalty.accrual,
         }
         .publish(env);
     }
@@ -951,6 +1380,43 @@ mod events {
             gross_amount,
             seller_net,
             royalty_share,
+        }
+        .publish(env);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn accrual_credited(
+        env: &Env,
+        collection: &Address,
+        token: &Address,
+        payer: &Address,
+        seller: &Address,
+        recipient: &Address,
+        amount: i128,
+    ) {
+        AccrualCredited {
+            collection: collection.clone(),
+            token: token.clone(),
+            payer: payer.clone(),
+            seller: seller.clone(),
+            recipient: recipient.clone(),
+            amount,
+        }
+        .publish(env);
+    }
+
+    pub fn accrual_distributed(
+        env: &Env,
+        collection: &Address,
+        token: &Address,
+        recipient: &Address,
+        amount: i128,
+    ) {
+        AccrualDistributed {
+            collection: collection.clone(),
+            token: token.clone(),
+            recipient: recipient.clone(),
+            amount,
         }
         .publish(env);
     }
@@ -981,7 +1447,7 @@ mod tests {
             let contract_id = env.register(MarketplaceRoyalties, ());
             let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
             let accounts = TestAccounts::generate(&env);
-            client.set_royalty(&accounts.arbiter, &accounts.user2, &500_u32);
+            client.set_royalty(&accounts.arbiter, &accounts.user2, &500_u32, &false);
             (env, client, accounts)
         }};
     }
@@ -1005,7 +1471,7 @@ mod tests {
             let contract_id = env.register(MarketplaceRoyalties, ());
             let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
             let accounts = TestAccounts::generate(&env);
-            client.set_royalty(&accounts.arbiter, &accounts.user2, &500_u32);
+            client.set_royalty(&accounts.arbiter, &accounts.user2, &500_u32, &false);
             token_admin.mint(&accounts.user1, &1_000_i128);
 
             (env, token, token_client, contract_id, client, accounts)
@@ -1024,7 +1490,7 @@ mod tests {
     #[test]
     fn set_royalty_update_in_place() {
         let (_env, client, accounts) = setup!();
-        client.set_royalty(&accounts.arbiter, &accounts.user3, &1_000_u32);
+        client.set_royalty(&accounts.arbiter, &accounts.user3, &1_000_u32, &false);
         let royalty = client.get_royalty(&accounts.arbiter);
         assert_eq!(royalty.recipient, accounts.user3);
         assert_eq!(royalty.bps, 1_000);
@@ -1034,7 +1500,7 @@ mod tests {
     fn set_royalty_rejects_bps_over_100_percent() {
         let (_env, client, accounts) = setup!();
         let err = client
-            .try_set_royalty(&accounts.arbiter, &accounts.user2, &10_001_u32)
+            .try_set_royalty(&accounts.arbiter, &accounts.user2, &10_001_u32, &false)
             .unwrap_err()
             .unwrap();
         assert_eq!(err, ForgeError::InvalidInput);
@@ -1177,7 +1643,7 @@ mod tests {
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, recipient, &0_u32);
+        client.set_royalty(collection, recipient, &0_u32, &false);
 
         let net = client.distribute(collection, &token, payer, seller, &1_000_i128);
         assert_eq!(net, 1_000);
@@ -1193,7 +1659,7 @@ mod tests {
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, recipient, &10_000_u32);
+        client.set_royalty(collection, recipient, &10_000_u32, &false);
 
         let net = client.distribute(collection, &token, payer, seller, &1_000_i128);
         assert_eq!(net, 0);
@@ -1247,6 +1713,7 @@ mod tests {
             recipient: recipient.clone(),
             bps: 500,
             status: RoyaltyStatus::Disabled,
+            accrual: false,
         };
         env.as_contract(&contract_id, || {
             env.storage()
@@ -1376,7 +1843,7 @@ mod tests {
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, recipient, &0_u32);
+        client.set_royalty(collection, recipient, &0_u32, &false);
 
         let settled = client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
@@ -1403,6 +1870,7 @@ mod tests {
             recipient: recipient.clone(),
             bps: 500,
             status: RoyaltyStatus::Disabled,
+            accrual: false,
         };
         env.as_contract(&contract_id, || {
             env.storage()
@@ -1425,7 +1893,7 @@ mod tests {
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, recipient, &10_000_u32);
+        client.set_royalty(collection, recipient, &10_000_u32, &false);
 
         let settled = client.settle_sale(collection, &token, payer, seller, &1_000_i128);
 
@@ -1958,7 +2426,7 @@ mod tests {
         let recipient = &accounts.user2;
         let seller = &accounts.user3;
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, recipient, &0_u32);
+        client.set_royalty(collection, recipient, &0_u32, &false);
 
         client.settle_sale(collection, &token, payer, seller, &100_i128);
 
@@ -2054,7 +2522,7 @@ mod tests {
         let seller_a = &accounts.user3;
         let seller_b = &accounts.validator;
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, recipient, &0_u32);
+        client.set_royalty(collection, recipient, &0_u32, &false);
 
         let batch = sales_of(&env, &[(seller_a.clone(), 500), (seller_b.clone(), 500)]);
         let settled = client.settle_sales(collection, &token, payer, &batch);
@@ -2086,6 +2554,7 @@ mod tests {
             recipient: recipient.clone(),
             bps: 500,
             status: RoyaltyStatus::Disabled,
+            accrual: false,
         };
         env.as_contract(&contract_id, || {
             env.storage()
@@ -2143,7 +2612,7 @@ mod tests {
     fn events_emitted_on_set_royalty_and_settle() {
         let (env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
         let collection = &accounts.arbiter;
-        client.set_royalty(collection, &accounts.user2, &500_u32);
+        client.set_royalty(collection, &accounts.user2, &500_u32, &false);
         client.settle_sale(
             collection,
             &token,
@@ -2195,7 +2664,7 @@ mod tests {
         StellarAssetClient::new(&_env, &token).mint(&accounts.user1, &10_000_i128);
 
         for bps in [0_u32, 1, 500, 4_321, 9_999, 10_000] {
-            client.set_royalty(collection, &accounts.user2, &bps);
+            client.set_royalty(collection, &accounts.user2, &bps, &false);
             let quote = client.quote_sale(collection, &1_234_i128);
             let (royalty_share, seller_net) =
                 split(1_234, effective_bps(&client.get_royalty(collection))).unwrap();
@@ -2219,7 +2688,7 @@ mod tests {
     #[test]
     fn quote_zero_bps_quotes_the_full_amount_to_the_seller() {
         let (_env, client, accounts) = setup!();
-        client.set_royalty(&accounts.arbiter, &accounts.user2, &0_u32);
+        client.set_royalty(&accounts.arbiter, &accounts.user2, &0_u32, &false);
         let quote = client.quote_sale(&accounts.arbiter, &1_000_i128);
         assert_eq!(quote.royalty_bps, 0);
         assert_eq!(quote.royalty_amount, 0);
@@ -2229,7 +2698,7 @@ mod tests {
     #[test]
     fn quote_max_bps_quotes_the_full_amount_to_the_recipient() {
         let (_env, client, accounts) = setup!();
-        client.set_royalty(&accounts.arbiter, &accounts.user2, &10_000_u32);
+        client.set_royalty(&accounts.arbiter, &accounts.user2, &10_000_u32, &false);
         let quote = client.quote_sale(&accounts.arbiter, &1_000_i128);
         assert_eq!(quote.royalty_bps, 10_000);
         assert_eq!(quote.royalty_amount, 1_000);
@@ -2275,6 +2744,7 @@ mod tests {
             recipient: accounts.user2.clone(),
             bps: 500,
             status: RoyaltyStatus::Disabled,
+            accrual: false,
         };
         env.as_contract(&contract_id, || {
             env.storage()
@@ -2321,5 +2791,395 @@ mod tests {
         assert_eq!(tc.balance(seller), balances_before.1);
         assert_eq!(tc.balance(recipient), balances_before.2);
         assert!(env.events().all().events().is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // Accrual / recoupment ledger
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn accrual_flag_is_stored_and_defaults_to_false() {
+        let (_env, client, accounts) = setup!();
+        let royalty = client.get_royalty(&accounts.arbiter);
+        assert!(!royalty.accrual, "default accrual mode is payout");
+    }
+
+    #[test]
+    fn accrual_settle_sale_credits_ledger_and_pays_seller_net_only() {
+        let (_env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+
+        // One sale of 1_000 at 5%: 950 to seller, 50 credited to ledger.
+        let settled = client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        assert_eq!(settled.seller_net, 950);
+        assert_eq!(settled.royalty_share, 50);
+
+        assert_eq!(tc.balance(&accounts.user1), 0, "payer funded the sale");
+        assert_eq!(tc.balance(&accounts.user3), 950, "seller received net");
+        assert_eq!(
+            tc.balance(&accounts.user2),
+            0,
+            "recipient is not paid in accrual mode"
+        );
+        assert_eq!(
+            tc.balance(&contract_id),
+            50,
+            "contract custody holds the royalty share"
+        );
+
+        assert_eq!(client.get_accrued(collection, &token), 50);
+        assert_eq!(
+            client.get_recipient_accrued(collection, &token, &accounts.user2),
+            50
+        );
+
+        let summary = client.get_settlement_summary(collection);
+        assert_eq!(summary.sales, 1);
+        assert_eq!(summary.gross_volume, 1_000);
+        assert_eq!(
+            summary.royalties_paid, 0,
+            "royalties are not 'paid' until swept"
+        );
+    }
+
+    #[test]
+    fn accrual_distribute_credits_ledger_and_returns_net() {
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+
+        let net = client.distribute(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        assert_eq!(net, 950);
+        assert_eq!(
+            tc.balance(&accounts.user1),
+            950,
+            "payer retains net after royalty"
+        );
+        assert_eq!(tc.balance(&accounts.user2), 0, "recipient not paid yet");
+        assert_eq!(client.get_accrued(collection, &token), 50);
+    }
+
+    #[test]
+    fn accrual_events_sum_matches_ledger_view() {
+        let (env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+        StellarAssetClient::new(&env, &token).mint(&accounts.user1, &1_000_i128);
+
+        // `env.events().all()` reflects the most recently completed
+        // invocation, so read the events immediately after each sale.
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        let first_event_count = env.events().all().events().len();
+        assert!(
+            first_event_count > 0,
+            "accrual event emitted for first sale"
+        );
+
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &400_i128,
+        );
+        let second_event_count = env.events().all().events().len();
+        assert!(
+            second_event_count > 0,
+            "accrual event emitted for second sale"
+        );
+
+        // The accrual-credit events carry the same amounts that update the
+        // ledger, so the ledger total equals the sum of the per-sale credits.
+        let expected_from_events = 50 + 20;
+        assert_eq!(client.get_accrued(collection, &token), expected_from_events);
+    }
+
+    #[test]
+    fn accrual_settle_sales_batch_credits_ledger_once() {
+        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+        StellarAssetClient::new(&env, &token).mint(&accounts.user1, &1_000_i128);
+
+        let batch = sales_of(
+            &env,
+            &[
+                (accounts.user3.clone(), 400),
+                (accounts.validator.clone(), 600),
+            ],
+        );
+        let settled = client.settle_sales(collection, &token, &accounts.user1, &batch);
+        assert_eq!(settled.len(), 2);
+
+        // 400 -> 20 share, 600 -> 30 share; total 50 accrued.
+        assert_eq!(tc.balance(&accounts.user3), 380);
+        assert_eq!(tc.balance(&accounts.validator), 570);
+        assert_eq!(tc.balance(&accounts.user2), 0);
+        assert_eq!(tc.balance(&contract_id), 50);
+        assert_eq!(client.get_accrued(collection, &token), 50);
+
+        let summary = client.get_settlement_summary(collection);
+        assert_eq!(summary.sales, 2);
+        assert_eq!(summary.gross_volume, 1_000);
+        assert_eq!(summary.royalties_paid, 0);
+    }
+
+    #[test]
+    fn accrual_sweep_pays_recipient_exactly_and_clears_ledger() {
+        let (_env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+        StellarAssetClient::new(&_env, &token).mint(&accounts.user1, &1_000_i128);
+
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &400_i128,
+        );
+        let accrued = client.get_accrued(collection, &token);
+        assert_eq!(accrued, 70);
+
+        let swept = client.distribute_accrued(collection, &token);
+        assert_eq!(swept, 70);
+        assert_eq!(tc.balance(&accounts.user2), 70);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(client.get_accrued(collection, &token), 0);
+        assert_eq!(
+            client.get_recipient_accrued(collection, &token, &accounts.user2),
+            0
+        );
+
+        let summary = client.get_settlement_summary(collection);
+        assert_eq!(
+            summary.royalties_paid, 70,
+            "sweep records the actual payout"
+        );
+    }
+
+    #[test]
+    fn accrual_sweep_on_empty_ledger_returns_accrual_empty() {
+        let (_env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+
+        let err = client
+            .try_distribute_accrued(collection, &token)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::AccrualEmpty);
+    }
+
+    #[test]
+    fn accrual_sweep_after_full_sweep_is_empty() {
+        let (_env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+        StellarAssetClient::new(&_env, &token).mint(&accounts.user1, &1_000_i128);
+
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        client.distribute_accrued(collection, &token);
+
+        let err = client
+            .try_distribute_accrued(collection, &token)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::AccrualEmpty);
+        assert_eq!(tc.balance(&contract_id), 0);
+        assert_eq!(tc.balance(&accounts.user2), 50);
+    }
+
+    #[test]
+    fn accrual_flag_cannot_flip_after_settlement_history() {
+        let (_env, token, _tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+        StellarAssetClient::new(&_env, &token).mint(&accounts.user1, &1_000_i128);
+
+        // Any successful sale creates settlement history.
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+
+        // Flipping the flag is rejected.
+        let err = client
+            .try_set_royalty(collection, &accounts.user2, &500_u32, &false)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::InvalidState);
+
+        // Re-registering with the same flag is fine.
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+    }
+
+    #[test]
+    fn accrual_mode_interleaved_with_payout_mode_does_not_interfere() {
+        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let accrual_collection = Address::generate(&env);
+        let payout_collection = Address::generate(&env);
+
+        client.set_royalty(&accrual_collection, &accounts.user2, &500_u32, &true);
+        client.set_royalty(&payout_collection, &accounts.user2, &500_u32, &false);
+        StellarAssetClient::new(&env, &token).mint(&accounts.user1, &2_000_i128);
+
+        client.settle_sale(
+            &accrual_collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        client.settle_sale(
+            &payout_collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+
+        assert_eq!(
+            tc.balance(&accounts.user2),
+            50,
+            "payout collection paid immediately"
+        );
+        assert_eq!(
+            tc.balance(&contract_id),
+            50,
+            "accrual collection held in custody"
+        );
+        assert_eq!(client.get_accrued(&accrual_collection, &token), 50);
+        assert_eq!(client.get_accrued(&payout_collection, &token), 0);
+
+        client.distribute_accrued(&accrual_collection, &token);
+        assert_eq!(tc.balance(&accounts.user2), 100);
+        assert_eq!(client.get_accrued(&accrual_collection, &token), 0);
+    }
+
+    #[test]
+    fn accrual_failed_sweep_rolls_back_ledger_and_summary() {
+        let (env, token, tc, contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &500_u32, &true);
+        StellarAssetClient::new(&env, &token).mint(&accounts.user1, &1_000_i128);
+
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &1_000_i128,
+        );
+        let accrued_before = client.get_accrued(collection, &token);
+        let summary_before = client.get_settlement_summary(collection);
+
+        // Inflate the ledger beyond the contract's actual token balance so
+        // the outbound sweep transfer fails. This tests that the ledger
+        // debit is rolled back atomically.
+        let corrupted_ledger = AccrualLedger {
+            total: accrued_before + 1_000,
+            per_recipient: {
+                let mut m = Map::new(&env);
+                m.set(accounts.user2.clone(), accrued_before + 1_000);
+                m
+            },
+        };
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(
+                &DataKey::AccrualLedger(AccrualLedgerKey(collection.clone(), token.clone())),
+                &corrupted_ledger,
+            );
+        });
+
+        let err = client
+            .try_distribute_accrued(collection, &token)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ForgeError::TokenTransferFailed);
+
+        assert_eq!(
+            client.get_accrued(collection, &token),
+            corrupted_ledger.total,
+            "ledger restored to pre-call state; never cleared mid-failure"
+        );
+        assert_eq!(
+            client.get_settlement_summary(collection).royalties_paid,
+            summary_before.royalties_paid,
+            "summary unchanged on rollback"
+        );
+        assert_eq!(tc.balance(&accounts.user2), 0);
+        assert_eq!(tc.balance(&contract_id), 50);
+    }
+
+    #[test]
+    fn accrual_conservation_credit_equals_sweep_payout_no_dust() {
+        let (_env, token, tc, _contract_id, client, accounts) = setup_settlement!();
+        let collection = &accounts.arbiter;
+        client.set_royalty(collection, &accounts.user2, &333_u32, &true);
+        StellarAssetClient::new(&_env, &token).mint(&accounts.user1, &14_000_i128);
+
+        // 10_000 at 333 bps -> 333 share, 9_667 net (floored)
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &10_000_i128,
+        );
+        // 4_000 at 333 bps -> 133 share, 3_867 net
+        client.settle_sale(
+            collection,
+            &token,
+            &accounts.user1,
+            &accounts.user3,
+            &4_000_i128,
+        );
+
+        let accrued = client.get_accrued(collection, &token);
+        let contract_balance_before = tc.balance(&accounts.user2);
+        let swept = client.distribute_accrued(collection, &token);
+        assert_eq!(swept, 333 + 133);
+        assert_eq!(accrued, swept, "accrued total equals sweep payout exactly");
+        assert_eq!(
+            tc.balance(&accounts.user2),
+            contract_balance_before + swept,
+            "recipient received every accrued token"
+        );
     }
 }

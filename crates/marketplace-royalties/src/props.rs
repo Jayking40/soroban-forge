@@ -15,10 +15,14 @@
 //!    underfunded payer — fails with the same error the single-sale path
 //!    raises for that defect and leaves every balance and the committed
 //!    summary byte-identical to the pre-call state.
-
-//! 4. Batch conservation: the aggregate of a random batch satisfies `sum(seller_net) + sum(royalty_share) == sum(amount)`.
-//! 5. Cap boundary: a batch exceeding `MAX_SETTLE_SALES` is rejected before any transfer.
-//! 6. Rollback integrity: a failed batch transfer leaves every balance and the summary untouched.
+//! 6. Accrual conservation: in accrual mode, `settle_sale` credits sum to the
+//!    ledger and `distribute_accrued` pays exactly that sum, leaving zero
+//!    custody and updating `royalties_paid` by the swept amount.
+//!
+//! Earlier payout-mode invariants (kept in the suite above):
+//! - Batch aggregate: `sum(seller_net) + sum(royalty_share) == sum(amount)`.
+//! - Cap boundary: a batch exceeding `MAX_SETTLE_SALES` is rejected before any transfer.
+//! - Rollback integrity: a failed batch transfer leaves every balance and the summary untouched.
 
 use crate::{
     MarketplaceRoyalties, SettlementSummary, SorobanForgeMarketplaceRoyaltiesClient,
@@ -73,7 +77,7 @@ fn setup_world(bps: u32, mint_amount: i128) -> World {
 
     let contract_id = env.register(MarketplaceRoyalties, ());
     let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
-    client.set_royalty(&collection, &recipient, &bps);
+    client.set_royalty(&collection, &recipient, &bps, &false);
 
     World {
         env,
@@ -207,7 +211,7 @@ fn setup_batch_world(bps: u32, amounts: Vec<i128>) -> BatchWorld {
 
     let contract_id = env.register(MarketplaceRoyalties, ());
     let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
-    client.set_royalty(&collection, &recipient, &bps);
+    client.set_royalty(&collection, &recipient, &bps, &false);
 
     BatchWorld {
         env,
@@ -356,7 +360,7 @@ proptest! {
 
         let contract_id = env.register(MarketplaceRoyalties, ());
         let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
-        client.set_royalty(&collection, &recipient, &bps);
+        client.set_royalty(&collection, &recipient, &bps, &false);
 
         let mut batch = soroban_sdk::Vec::new(&env);
         batch.push_back((seller_a.clone(), 1_000_000_000_000_000_i128));
@@ -637,6 +641,117 @@ proptest! {
             &w.summary(&w.collection),
             &before_summary,
             "the single-sale cross-check leaves the summary untouched"
+        );
+    }
+}
+
+/// Accrual-mode world: same shape as `setup_world` but the collection is
+/// opted into accrual and the contract address is exposed so custody checks
+/// can inspect it.
+fn setup_accrual_world(bps: u32, mint_amount: i128) -> World {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let token = sac.address();
+
+    let collection = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let mut sellers = std::vec::Vec::with_capacity(SELLER_POOL);
+    sellers.push(seller.clone());
+    for _ in 1..SELLER_POOL {
+        sellers.push(Address::generate(&env));
+    }
+
+    StellarAssetClient::new(&env, &token).mint(&payer, &mint_amount);
+
+    let contract_id = env.register(MarketplaceRoyalties, ());
+    let client = SorobanForgeMarketplaceRoyaltiesClient::new(&env, &contract_id);
+    client.set_royalty(&collection, &recipient, &bps, &true);
+
+    World {
+        env,
+        token,
+        contract_id,
+        collection,
+        recipient,
+        seller,
+        sellers,
+        payer,
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// In accrual mode, the sum of credited royalty shares equals the
+    /// amount later swept, with zero contract custody left behind and the
+    /// summary's `royalties_paid` incremented only on sweep.
+    #[test]
+    fn prop_accrual_credit_equals_sweep_payout(
+        bps in 0u32..=10_000_u32,
+        amount in 1i128..=MAX_AMOUNT,
+    ) {
+        let w = setup_accrual_world(bps, amount);
+        let expected_royalty = amount * (bps as i128) / 10_000;
+        let expected_net = amount - expected_royalty;
+
+        w.client().settle_sale(&w.collection, &w.token, &w.payer, &w.seller, &amount);
+
+        prop_assert_eq!(
+            w.token_client().balance(&w.contract_id),
+            expected_royalty,
+            "contract custody equals the credited royalty share"
+        );
+        prop_assert_eq!(
+            w.token_client().balance(&w.recipient),
+            0,
+            "recipient is not paid until sweep"
+        );
+        prop_assert_eq!(
+            w.token_client().balance(&w.seller),
+            expected_net,
+            "seller receives net"
+        );
+        prop_assert_eq!(
+            w.client().get_accrued(&w.collection, &w.token),
+            expected_royalty,
+            "ledger view equals credited amount"
+        );
+
+        let summary_before = w.client()
+            .get_settlement_summary(&w.collection);
+        prop_assert_eq!(
+            summary_before.royalties_paid, 0,
+            "royalties_paid stays zero until sweep"
+        );
+
+        let swept = w.client().distribute_accrued(&w.collection, &w.token);
+        prop_assert_eq!(swept, expected_royalty);
+        prop_assert_eq!(
+            w.token_client().balance(&w.contract_id),
+            0,
+            "contract custody is empty after sweep"
+        );
+        prop_assert_eq!(
+            w.token_client().balance(&w.recipient),
+            expected_royalty,
+            "recipient receives exact accrued amount"
+        );
+        prop_assert_eq!(
+            w.client().get_accrued(&w.collection, &w.token),
+            0,
+            "ledger is cleared after sweep"
+        );
+        let summary_after = w.client()
+            .get_settlement_summary(&w.collection);
+        prop_assert_eq!(
+            summary_after.royalties_paid,
+            expected_royalty,
+            "summary records the swept amount"
         );
     }
 }
