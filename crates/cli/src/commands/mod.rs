@@ -1,5 +1,6 @@
 pub mod build;
 pub mod deploy;
+pub mod doctor;
 pub mod events;
 pub mod invoke;
 pub mod lint;

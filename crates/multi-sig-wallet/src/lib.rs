@@ -2161,55 +2161,22 @@ mod authz;
 #[cfg(test)]
 mod props;
 
+// TTL chaos harness demo: drives randomized ledger gaps through the
+// multi-sig-wallet transaction lifecycle and asserts no persistent tx
+// record expires during a legitimate flow.
+#[cfg(test)]
+mod ttl_chaos;
+
 #[cfg(test)]
 mod indexer_fixtures;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_forge_test_utils::TestAccounts;
+    use soroban_forge_test_utils::{MockTarget, MockTargetClient, TestAccounts};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{contract, contractimpl, Bytes, Env, FromVal, Map, Symbol, TryIntoVal, Val};
-
-    /// A minimal mock target contract for testing cross-contract
-    /// invocation. Its `execute` method is a no-op that accepts the
-    /// payload without panicking, proving the invocation succeeded.
-    #[contract]
-    pub struct MockTarget;
-
-    #[contracttype]
-    enum MockTargetKey {
-        /// Account balances (unused, but required for the contract).
-        Balance(Address),
-    }
-
-    #[contractimpl]
-    impl MockTarget {
-        /// Accept the invocation. Does not access storage, so it
-        /// works reliably through `try_invoke_contract` in the test
-        /// host.
-        pub fn execute(_env: Env, _payload: Bytes) {}
-    }
-
-    /// A mock target whose `execute` panics, simulating a target
-    /// revert for testing the failure-ordering guarantee.
-    #[contract]
-    pub struct BlockingTarget;
-
-    #[contracttype]
-    enum BlockingTargetKey {
-        /// Account balances (unused, but required for the contract).
-        Balance(Address),
-    }
-
-    #[contractimpl]
-    impl BlockingTarget {
-        /// Panics on invocation, simulating a target revert.
-        pub fn execute(_env: Env, _payload: Bytes) {
-            panic!("target reverted");
-        }
-    }
 
     /// Build a fresh env with mocked auths, a registered contract, a configured
     /// wallet (threshold 2), and named accounts. The generated client exposes
@@ -3039,7 +3006,8 @@ mod tests {
     fn execute_target_revert_leaves_tx_unexecuted() {
         let (env, client, accounts) = setup!();
         let mock_target_id = Address::generate(&env);
-        env.register_at(&mock_target_id, BlockingTarget, ());
+        env.register_at(&mock_target_id, MockTarget, ());
+        MockTargetClient::new(&env, &mock_target_id).set_revert(&true);
         let tx_id = client.submit(&accounts.user1, &mock_target_id, &payload(&env), &None);
         client.confirm(&tx_id, &accounts.user2);
         client.confirm(&tx_id, &accounts.user3);

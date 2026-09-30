@@ -818,6 +818,7 @@ impl MarketplaceRoyalties {
         let mut gross_volume: i128 = 0;
         let mut royalties_paid: i128 = 0;
         let mut accrual_credit: i128 = 0;
+        let emit_per_sale = count <= 10;
         for (_, amount) in sales.iter() {
             let (shares, royalty_share, seller_net) =
                 split_recipients(&env, amount, &royalty, &recipients)?;
@@ -849,7 +850,7 @@ impl MarketplaceRoyalties {
         for i in 0..count {
             // Both `get`s are in range by construction: `sales` has `count`
             // entries and `settlements` was built one-for-one from it.
-            let (seller, _) = sales.get(i).ok_or(ForgeError::InvalidInput)?;
+            let (seller, amount) = sales.get(i).ok_or(ForgeError::InvalidInput)?;
             let settlement = settlements.get(i).ok_or(ForgeError::InvalidInput)?;
             if settlement.seller_net > 0 {
                 transfer(&env, &token, &payer, &seller, settlement.seller_net)?;
@@ -873,6 +874,38 @@ impl MarketplaceRoyalties {
                     )?;
                 }
             }
+            if emit_per_sale {
+                events::sale_settled(
+                    &env,
+                    &collection,
+                    &token,
+                    &payer,
+                    &seller,
+                    &royalty.recipient,
+                    amount,
+                    settlement.seller_net,
+                    settlement.royalty_share,
+                );
+            }
+        }
+
+        if !emit_per_sale {
+            // A full per-sale event payload for the 20-sale cap exceeds
+            // Soroban's invocation event-size budget. The aggregate event
+            // uses the collection as the seller sentinel and sums the
+            // per-sale fields; the returned Settlement vector retains every
+            // individual seller and split.
+            events::sale_settled(
+                &env,
+                &collection,
+                &token,
+                &payer,
+                &collection,
+                &royalty.recipient,
+                gross_volume,
+                gross_volume - royalties_paid,
+                royalties_paid,
+            );
         }
 
         // Every transfer succeeded; only now commit settlement state, once.
@@ -2124,6 +2157,18 @@ mod tests {
         );
         let settled = client.settle_sales(collection, &token, payer, &batch);
 
+        // Three seller transfers, two non-zero royalty transfers, and one
+        // SaleSettled event per sale (including the zero-share sale).
+        assert_eq!(
+            env.events()
+                .all()
+                .filter_by_contract(&contract_id)
+                .events()
+                .len(),
+            3,
+            "one SaleSettled event per sale"
+        );
+
         assert_eq!(settled.len(), 3);
         assert_eq!(
             settled.get(0).unwrap(),
@@ -2463,6 +2508,12 @@ mod tests {
         // after the FIRST sale fully succeeded. Frame rollback must undo
         // everything: no sale half-settled, no summary committed.
         let batch = sales_of(&env, &[(seller_a.clone(), 400), (seller_b.clone(), 630)]);
+        let events_before = env
+            .events()
+            .all()
+            .filter_by_contract(&contract_id)
+            .events()
+            .len();
         let err = client
             .try_settle_sales(collection, &token, payer, &batch)
             .unwrap_err()
@@ -2484,6 +2535,14 @@ mod tests {
                 .unwrap(),
             ForgeError::NotFound,
             "no settlement state is committed on failure"
+        );
+        assert_eq!(
+            env.events()
+                .all()
+                .filter_by_contract(&contract_id)
+                .events()
+                .len(),
+            events_before
         );
     }
 

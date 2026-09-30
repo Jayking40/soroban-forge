@@ -154,3 +154,5 @@ A permissionless public keeper entrypoint `touch_tx_ttl(tx_id)` allows
 anyone to bump a transaction's persistent TTL without modifying its state;
 an unknown `tx_id` returns `ForgeError::NotFound`. A separate
 `touch_ttl(token)` keeper extends the persistent balance entries' TTL.
+
+<div id="task-247"></div>

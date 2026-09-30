@@ -31,6 +31,9 @@ treasury at a terminal transition.
 | :--- | :---: | :--- |
 | `create_escrow` | ✅ Implemented | Validates amount/timeout, buyer+seller auth, takes the SEP-41 token address |
 | `deposit` | ✅ Implemented | **Real token transfer** buyer → contract, before any state write |
+| `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller |
+| `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** |
+| `refund_expired` | ✅ Implemented | Permissionless strictly after timeout; `Funded` only, disputed escrows frozen |
 | `release` | ✅ Implemented | Seller-authorized; **real token transfer** contract → seller (full remaining balance) |
 | `release_partial` | ✅ Implemented | Seller-authorized; **real token transfer** of a partial amount contract → seller; `released` accounting tracked; final partial transitions to `Completed`; `refund`/`resolve` operate on remaining balance |
 | `refund` | ✅ Implemented | Seller pre-deadline / buyer post-deadline; **real token transfer** of remaining balance |
@@ -39,6 +42,9 @@ treasury at a terminal transition.
 | `cancel` | ✅ Implemented | Buyer, `Pending` only; removes id from each distinct participant index after validation/auth |
 | `get_status` / `get_escrow` / `escrows_for_participant` | ✅ Implemented | Read-only views; participant index excludes cancelled ids but retains other terminal records; live offset pagination, restart at cursor 0 after cancellation |
 | `touch_ttl` | ✅ Implemented | Permissionless TTL keeper for the escrow's persistent entry |
+| Events | ✅ Implemented | Includes distinct `RefundExpired` keeper event; escrow id as topic |
+| Storage | ✅ Persistent + TTL | Per-id persistent entries; instance storage only for the id counter |
+| Tests | ✅ 55 | Full lifecycle, dispute paths, expiry-refund boundary and event coverage, failure ordering, conservation property, **randomized property suite** (proptest), and **negative-auth suite** (`authz.rs`) |
 | Events | ✅ Implemented | `EscrowCreated`, `Deposited`, `Released`, `PartiallyReleased`, `Refunded`, `Disputed`, `Resolved`, `Cancelled`; id as topic |
 | Storage | ✅ Persistent + TTL | Per-id persistent entries; instance storage only for the id counter; **backward-compatible schema migration** via `EscrowDataV1` fallback decode (old records default `released = 0`) |
 | Tests | ✅ 85 | Full lifecycle, dispute paths, cancellation index maintenance and live-pagination interleaving, failure ordering, conservation property, partial-release (valid/multi/final/zero/negative/over-remaining/non-Funded/after-completion/→refund/→dispute→resolve, storage compat, conservation), **randomized property suite** (proptest): conservation over random paths + partial-release sequences, tamper-resilient pool conservation, fund safety over arbitrary call sequences (now includes `release_partial`), multi-party create/cancel participant-index consistency; **negative-auth suite** (`authz.rs`): per-entrypoint wrong-signer rejection, `release_partial` seller-only auth + mutation test, signature/args replay rejection, `env.auths()` authorization-tree assertions |
@@ -80,16 +86,16 @@ treasury at a terminal transition.
 |---|---|---|
 | `initialize` | ✅ Implemented | One-time permissionless configuration of the SEP-41 governance token used to weight votes |
 | `configure_bond` | ✅ Implemented | One-time permissionless config (token, amount, treasury); first caller wins; `propose` is rejected with `NotInitialized` while unconfigured |
-| `propose` | ✅ Implemented | Stores the target contract, opaque action payload, and voting deadline; enforces proposer cooldown limit (`DEFAULT_MAX_ACTIVE_PROPOSALS = 5`, returning `ForgeError::ProposerCooldown`); **real token transfer** proposer → contract for the bond, before any state write |
+| `propose` | ✅ Implemented | Stores target, action, deadline, `requires` and one optional `conflicts_with`; validates dependencies and cycles; enforces the proposer active-proposal limit of 5; bond transfer before writes |
 | `vote` | ✅ Implemented | One-vote-per-voter; adds the voter's current governance-token balance to the selected tally; zero-balance votes rejected |
-| `execute` | ✅ Implemented | Permissionless majority finalization, then `try_invoke_contract` to `target.execute(action)`; target failure leaves the proposal `Succeeded`; on terminal transitions the bond is **refunded** to the proposer (`Executed`) or **forfeited** to the treasury (`Defeated`) in the same frame; decrements proposer active count |
-| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; **real token transfer** refund of the bond; decrements proposer active count |
-| `get_proposal` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only views; pagination with bounds clamping; proposer active proposal count tracking |
+| `execute` | ✅ Implemented | Permissionless majority finalisation and dependency-gated dispatch; unmet requirements return `DeadlineReached`, executed conflicts return `InvalidInput`, and cancelled/defeated requirements permanently strand dependents in `Succeeded`; target failure remains retryable; terminal transitions decrement proposer active count |
+| `cancel_proposal` | ✅ Implemented | Proposer-authorized revocation; bond refund; decrements proposer active count |
+| `get_proposal` / `get_dependencies` / `get_proposal_count` / `get_proposals` / `has_voted` / `get_active_proposal_count` | ✅ Implemented | Read-only proposal and dependency-edge views; pagination with bounds clamping and proposer active count |
 | `get_bond_config` | ✅ Implemented | Read-only; `NotInitialized` when no bond is configured |
 | `touch_ttl` | ✅ Implemented | Permissionless keeper: extends the persistent TTL of a proposal; `NotFound` for unknown ids |
-| Events | ✅ Implemented | `Proposed`, `VoteCast` (includes weight), `Finalised`, `BondPosted`, `BondReleased` (`proposal_id` as topic) |
-| Storage | ✅ Persistent + TTL | `DataKey::Proposal` records in persistent storage with 30-day TTL maintenance; count, bond config, governance-token config, custody total, vote markers, and proposer active counts in instance storage |
-| Tests | ✅ 81 | Bond custody lifecycle (post/refund/forfeit/conservation), proposer cooldown limit and decrements, weighted voting and arithmetic boundary tests, rollback-on-failure ordering, cross-contract dispatch + retry, introspection/pagination views, plus a **negative-auth suite** (`authz.rs`): wrong-signer and args-replay rejection, the nested token authorization frame for the bond pull, `env.auths()` authorization-tree assertions |
+| Events | ✅ Implemented | `Proposed` data includes dependency edges; event names/topics otherwise stable; `VoteCast`, `Finalised`, `BondPosted`, `BondReleased` |
+| Storage | ✅ Persistent + TTL | Dependencies live on persistent proposal records; no new top-level keys; count, config, custody, vote markers, and proposer active counts remain in instance storage |
+| Tests | ✅ 85+ | Bond custody, weighted voting and cooldown coverage; dependency ordering/conflicts/cancellation, malformed graph validation, dependency view/events, randomized execution-order mirror property; negative-auth suite retained |
 | Weighted voting | ✅ Implemented | Balance-weighted voting powered by immutable SEP-41 governance token configured at `initialize` |
 
 ## Subscription Payments (`crates/subscription-payments`)
