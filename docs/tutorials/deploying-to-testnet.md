@@ -8,14 +8,14 @@
 ## Build WASM
 
 ```bash
-cargo build --workspace --release
+cargo build --release --target wasm32v1-none -p soroban-forge-<contract>
 ```
 
 ## Deploy
 
 ```bash
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/soroban_forge_<contract>.wasm \
+  --wasm target/wasm32v1-none/release/soroban_forge_<contract>.wasm \
   --source-account <ACCOUNT_ID> \
   --network testnet
 ```

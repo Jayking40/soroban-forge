@@ -139,7 +139,15 @@ fn propose_accepts_the_proposer_signature_with_the_bond_pull() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "propose",
-            args: (proposer, &target_id, payload(&env), DURATION).into_val(&env),
+            args: (
+                proposer,
+                &target_id,
+                payload(&env),
+                DURATION,
+                soroban_sdk::Vec::<u64>::new(&env),
+                Option::<u64>::None,
+            )
+                .into_val(&env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &token,
                 fn_name: "transfer",
@@ -150,7 +158,14 @@ fn propose_accepts_the_proposer_signature_with_the_bond_pull() {
     }]);
 
     let id = client
-        .try_propose(proposer, &target_id, &payload(&env), &DURATION)
+        .try_propose(
+            proposer,
+            &target_id,
+            &payload(&env),
+            &DURATION,
+            &soroban_sdk::Vec::new(&env),
+            &None,
+        )
         .expect("outer ok")
         .expect("contract ok");
     assert_eq!(client.get_proposal_count(), 1);
@@ -164,7 +179,14 @@ fn propose_authorization_tree_is_proposer_over_bond_transfer() {
     let (env, token, _tc, contract_id, client, accounts, target_id) = setup!();
     let proposer = &accounts.user1;
 
-    client.propose(proposer, &target_id, &payload(&env), &DURATION);
+    client.propose(
+        proposer,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // The tree is the proposer's entrypoint frame with the bond pull as its
     // only sub-invocation — no other signer is ever demanded.
@@ -176,7 +198,15 @@ fn propose_authorization_tree_is_proposer_over_bond_transfer() {
                 function: AuthorizedFunction::Contract((
                     contract_id.clone(),
                     Symbol::new(&env, "propose"),
-                    (proposer.clone(), target_id.clone(), payload(&env), DURATION).into_val(&env),
+                    (
+                        proposer.clone(),
+                        target_id.clone(),
+                        payload(&env),
+                        DURATION,
+                        soroban_sdk::Vec::<u64>::new(&env),
+                        Option::<u64>::None,
+                    )
+                        .into_val(&env),
                 )),
                 sub_invocations: std::vec![AuthorizedInvocation {
                     function: AuthorizedFunction::Contract((
@@ -202,12 +232,27 @@ fn propose_rejects_signature_from_a_non_proposer() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "propose",
-            args: (&accounts.user1, &target_id, payload(&env), DURATION).into_val(&env),
+            args: (
+                &accounts.user1,
+                &target_id,
+                payload(&env),
+                DURATION,
+                soroban_sdk::Vec::<u64>::new(&env),
+                Option::<u64>::None,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let res = client.try_propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert_auth_abort!(res);
     assert_eq!(client.get_proposal_count(), 0);
     assert_eq!(tc.balance(&accounts.user1), FUNDS);
@@ -231,7 +276,14 @@ fn propose_rejects_signature_over_different_args() {
         },
     }]);
 
-    let res = client.try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let res = client.try_propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert_auth_abort!(res);
     assert_eq!(client.get_proposal_count(), 0);
 }
@@ -248,12 +300,27 @@ fn propose_without_nested_token_authorization_buckets_the_token_error() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "propose",
-            args: (&accounts.user1, &target_id, payload(&env), DURATION).into_val(&env),
+            args: (
+                &accounts.user1,
+                &target_id,
+                payload(&env),
+                DURATION,
+                soroban_sdk::Vec::<u64>::new(&env),
+                Option::<u64>::None,
+            )
+                .into_val(&env),
             sub_invokes: &[],
         },
     }]);
 
-    let res = client.try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let res = client.try_propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
     assert_eq!(client.get_proposal_count(), 0);
     assert_eq!(
@@ -275,7 +342,15 @@ fn propose_rejects_token_authorization_over_a_different_bond_amount() {
         invoke: &MockAuthInvoke {
             contract: &contract_id,
             fn_name: "propose",
-            args: (&accounts.user1, &target_id, payload(&env), DURATION).into_val(&env),
+            args: (
+                &accounts.user1,
+                &target_id,
+                payload(&env),
+                DURATION,
+                soroban_sdk::Vec::<u64>::new(&env),
+                Option::<u64>::None,
+            )
+                .into_val(&env),
             sub_invokes: &[MockAuthInvoke {
                 contract: &token,
                 fn_name: "transfer",
@@ -285,7 +360,14 @@ fn propose_rejects_token_authorization_over_a_different_bond_amount() {
         },
     }]);
 
-    let res = client.try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let res = client.try_propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert!(matches!(res, Err(Ok(ForgeError::TokenTransferFailed))));
     assert_eq!(client.get_proposal_count(), 0);
     assert_eq!(tc.balance(&accounts.user1), FUNDS);
@@ -300,11 +382,25 @@ fn blank_envelope_aborts_propose_and_writes_nothing() {
     // fails before anything is pulled or written.
     env.set_auths(&[]);
 
-    let res = client.try_propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let res = client.try_propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert_auth_abort!(res);
     // The id counter must not have advanced: the next proposal is id 1.
     env.mock_all_auths();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert_eq!(id, 1);
 }
 
@@ -316,7 +412,14 @@ fn blank_envelope_aborts_propose_and_writes_nothing() {
 fn cancel_accepts_the_proposer_signature_and_pays_the_refund() {
     let (env, _token, tc, contract_id, client, accounts, target_id) = setup!();
     let proposer = &accounts.user1;
-    let id = client.propose(proposer, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        proposer,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     assert_eq!(tc.balance(&contract_id), BOND);
 
     // The proposer's entrypoint signature alone completes the cancellation:
@@ -347,7 +450,14 @@ fn cancel_accepts_the_proposer_signature_and_pays_the_refund() {
 #[test]
 fn cancel_rejects_a_non_proposer_signature_even_when_armed() {
     let (env, _token, tc, contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // A third party signs a call whose `proposer` argument claims to be
     // them: the armed signature exists, but it is not the proposal's
@@ -377,7 +487,14 @@ fn cancel_rejects_a_non_proposer_signature_even_when_armed() {
 fn cancel_authorization_tree_is_the_proposer_entrypoint_frame() {
     let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
     let proposer = &accounts.user1;
-    let id = client.propose(proposer, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        proposer,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     client.cancel_proposal(&id, proposer);
 
@@ -407,7 +524,14 @@ fn cancel_authorization_tree_is_the_proposer_entrypoint_frame() {
 fn execute_refunds_the_bond_under_a_blank_envelope() {
     let (env, _token, tc, contract_id, client, accounts, target_id) = setup!();
     let proposer = &accounts.user1;
-    let id = client.propose(proposer, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        proposer,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     client.vote(&id, &accounts.user2, &true);
     env.ledger().set_timestamp(START + DURATION + 1);
     client.execute(&id); // Active -> Succeeded
@@ -430,7 +554,14 @@ fn execute_refunds_the_bond_under_a_blank_envelope() {
 #[test]
 fn execute_forfeits_the_bond_under_a_blank_envelope() {
     let (env, _token, tc, _contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
     client.vote(&id, &accounts.user2, &false);
     env.ledger().set_timestamp(START + DURATION + 1);
 
@@ -453,7 +584,14 @@ fn execute_forfeits_the_bond_under_a_blank_envelope() {
 #[test]
 fn vote_accepts_the_voter_signature() {
     let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // The voter's entrypoint signature alone completes the vote — no token
     // transfer occurs, so there is no nested sub-invocation.
@@ -480,7 +618,14 @@ fn vote_accepts_the_voter_signature() {
 #[test]
 fn vote_rejects_signature_from_a_different_address() {
     let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // A stranger (user3) arms their own signature for a vote whose `voter`
     // argument names user2. The contract calls `voter.require_auth()`, so the
@@ -507,7 +652,14 @@ fn vote_rejects_signature_from_a_different_address() {
 #[test]
 fn vote_rejects_signature_over_different_args() {
     let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // Correct signer, but the armed authorization covers a *different
     // support value* than the invocation performs. A captured signature
@@ -534,7 +686,14 @@ fn vote_rejects_signature_over_different_args() {
 #[test]
 fn vote_authorization_tree_is_the_voter_entrypoint_frame() {
     let (env, _token, _tc, contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // Under mock_all_auths, cast a vote and pin the recorded auth tree.
     client.vote(&id, &accounts.user2, &true);
@@ -560,7 +719,14 @@ fn vote_authorization_tree_is_the_voter_entrypoint_frame() {
 #[test]
 fn blank_envelope_aborts_vote_and_preserves_tally() {
     let (env, _token, _tc, _contract_id, client, accounts, target_id) = setup!();
-    let id = client.propose(&accounts.user1, &target_id, &payload(&env), &DURATION);
+    let id = client.propose(
+        &accounts.user1,
+        &target_id,
+        &payload(&env),
+        &DURATION,
+        &soroban_sdk::Vec::new(&env),
+        &None,
+    );
 
     // No authorization entries: every require_auth fails.
     env.set_auths(&[]);

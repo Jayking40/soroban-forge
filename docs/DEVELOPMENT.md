@@ -10,7 +10,7 @@ Build and run the developer CLI:
 
 ```bash
 # Build CLI binary
-cargo build -p soroban-forge-cli
+cargo build --locked -p soroban-forge-cli
 
 # Scaffold a new Soroban contract crate
 cargo run -p soroban-forge-cli -- new my-token
@@ -81,13 +81,13 @@ cargo metadata --locked --no-deps --format-version 1 > /dev/null
 
 ```bash
 make build
-# or: cargo build --workspace --all-targets
+# or: cargo build --workspace --all-targets --locked
 ```
 
 ### Release Build (WASM Artifacts)
 
 ```bash
-cargo build --release --target wasm32v1-none -p soroban-forge-escrow
+cargo build --locked --release --target wasm32v1-none -p soroban-forge-escrow
 # Builds: target/wasm32v1-none/release/soroban_forge_escrow.wasm
 ```
 
@@ -185,22 +185,22 @@ make test
 
 ```bash
 # Escrow
-cargo test --workspace --package soroban-forge-escrow
+cargo test --workspace --package soroban-forge-escrow --locked
 
 # Vesting
-cargo test --workspace --package soroban-forge-vesting
+cargo test --workspace --package soroban-forge-vesting --locked
 
 # Multi-Sig Wallet
-cargo test --workspace --package soroban-forge-multi-sig-wallet
+cargo test --workspace --package soroban-forge-multi-sig-wallet --locked
 
 # DAO Governance
-cargo test --workspace --package soroban-forge-dao-governance
+cargo test --workspace --package soroban-forge-dao-governance --locked
 
 # Subscription Payments
-cargo test --workspace --package soroban-forge-subscription-payments
+cargo test --workspace --package soroban-forge-subscription-payments --locked
 
 # Marketplace Royalties
-cargo test --workspace --package soroban-forge-marketplace-royalties
+cargo test --workspace --package soroban-forge-marketplace-royalties --locked
 ```
 
 ## Lint and Format
@@ -223,7 +223,7 @@ make format-check
 
 ```bash
 make lint
-# or: cargo clippy --workspace --all-targets -- -D warnings
+# or: cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 ### Security Audit

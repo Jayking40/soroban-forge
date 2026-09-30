@@ -138,5 +138,4 @@ A permissionless public keeper entrypoint `touch_ttl(collection)` allows anyone 
 The contract emits typed on-chain lifecycle events for indexers and off-chain monitoring:
 
 - `RoyaltyConfigured` (topic: `collection: Address`) — emitted when a royalty configuration is registered or updated via `set_royalty`. Contains `recipient` and `bps`.
-- `SaleSettled` (topic: `collection: Address`) — emitted on sale settlement via `settle_sale` or `settle_sales`. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.
-
+- `SaleSettled` (topic: `collection: Address`) — emitted once per settled sale via `settle_sale` or normal-size `settle_sales` batches (including zero-share and disabled-royalty sales). A batch larger than ten sales emits one aggregate event to remain within Soroban's event-size budget; its `seller` is the collection sentinel and its amount fields are batch totals, while the return value retains per-sale details. A failed batch emits no contract events because the invocation rolls back. Contains `token`, `payer`, `seller`, `royalty_recipient`, `gross_amount`, `seller_net`, and `royalty_share`.

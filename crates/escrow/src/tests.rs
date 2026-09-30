@@ -21,9 +21,9 @@
 
 use crate::{Escrow, EscrowData, EscrowStatus, SorobanForgeEscrowClient};
 use soroban_forge_shared_utils::ForgeError;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, IntoVal, Symbol, Val};
 
 const START: u64 = 1_000_000;
 const TIMEOUT: u64 = 1_000;
@@ -269,6 +269,104 @@ fn refund_requires_funded_state() {
 
     let err = client.try_refund(&id).unwrap_err().unwrap();
     assert_eq!(err, ForgeError::InvalidInput);
+}
+
+#[test]
+fn refund_expired_by_permissionless_keeper_after_deadline() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+    client.refund_expired(&id);
+
+    let event_signature: Val = Symbol::new(&env, "refund_expired").into_val(&env);
+    let event_data: soroban_sdk::Map<Symbol, Val> = soroban_sdk::map![
+        &env,
+        (Symbol::new(&env, "refunded_amount"), AMOUNT.into_val(&env)),
+        (
+            Symbol::new(&env, "timestamp"),
+            (START + TIMEOUT + 1).into_val(&env)
+        ),
+    ];
+    let event_topics: soroban_sdk::Vec<Val> =
+        soroban_sdk::vec![&env, event_signature, id.into_val(&env)];
+    let expected_events: soroban_sdk::Vec<(Address, soroban_sdk::Vec<Val>, Val)> = soroban_sdk::vec![
+        &env,
+        (contract_id.clone(), event_topics, event_data.into_val(&env))
+    ];
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id),
+        expected_events
+    );
+
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
+}
+
+#[test]
+fn refund_expired_rejects_before_deadline() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT - 1);
+    let err = client.try_refund_expired(&id).unwrap_err().unwrap();
+
+    assert_eq!(err, ForgeError::DeadlineReached);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn refund_expired_rejects_at_deadline() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT);
+    let err = client.try_refund_expired(&id).unwrap_err().unwrap();
+
+    assert_eq!(err, ForgeError::DeadlineReached);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(client.get_status(&id), EscrowStatus::Funded);
+}
+
+#[test]
+fn refund_expired_rejects_disputed_escrow() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.dispute(&id, buyer);
+
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+    let err = client.try_refund_expired(&id).unwrap_err().unwrap();
+
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(&contract_id), AMOUNT);
+    assert_eq!(client.get_status(&id), EscrowStatus::Disputed);
+}
+
+#[test]
+fn refund_expired_rejects_already_refunded_escrow() {
+    let (env, token, tc, contract_id, client, accounts) = setup!();
+    let (buyer, seller, arbiter) = parties(&accounts);
+    let id = create(&client, &token, buyer, seller, arbiter, TIMEOUT);
+    client.deposit(&id);
+    client.refund(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+    let err = client.try_refund_expired(&id).unwrap_err().unwrap();
+
+    assert_eq!(err, ForgeError::InvalidInput);
+    assert_eq!(tc.balance(buyer), AMOUNT);
+    assert_eq!(tc.balance(&contract_id), 0);
+    assert_eq!(client.get_status(&id), EscrowStatus::Refunded);
 }
 
 // -----------------------------------------------------------------------

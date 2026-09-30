@@ -49,6 +49,7 @@ struct World {
     env: Env,
     token: Address,
     vesting: Address,
+    funder: Address,
     beneficiary: Address,
 }
 
@@ -66,6 +67,7 @@ fn setup_world() -> World {
     World {
         token,
         vesting,
+        funder: Address::generate(&env),
         beneficiary: Address::generate(&env),
         env,
     }
@@ -86,6 +88,7 @@ impl World {
 
     fn create(&self, amount: i128, cliff: u64, duration: u64) -> u64 {
         self.vesting_client().create_schedule(
+            &self.funder,
             &self.beneficiary,
             &self.token,
             &amount,

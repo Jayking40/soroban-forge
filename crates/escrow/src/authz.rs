@@ -420,6 +420,22 @@ fn refund_authorization_tree_is_seller_pre_deadline() {
     );
 }
 
+#[test]
+fn refund_expired_requires_no_party_authorization() {
+    let (env, token, _tc, _contract_id, client, accounts) = setup!();
+    let buyer = &accounts.user1;
+    let seller = &accounts.user2;
+    let arbiter = &accounts.arbiter;
+    let id = client.create_escrow(buyer, seller, arbiter, &token, &AMOUNT, &TIMEOUT);
+    client.deposit(&id);
+
+    env.ledger().set_timestamp(START + TIMEOUT + 1);
+    env.mock_auths(&[]);
+    client.refund_expired(&id);
+
+    assert!(env.auths().is_empty());
+}
+
 // -----------------------------------------------------------------------
 // dispute
 // -----------------------------------------------------------------------
